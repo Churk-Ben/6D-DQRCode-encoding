@@ -5,8 +5,10 @@ import {
   calculateCapacity,
   createContainerFromBytes,
   decodeApng,
+  decodeMov,
   decodeFrame,
   encodeFileToApng,
+  encodeFileToMov,
   parseContainer,
   renderFrame,
 } from "../site/codec.js";
@@ -61,6 +63,29 @@ test("完整 APNG 编码和解码可跨多帧往返", async () => {
   assert.ok(encoded.frameCount > 1);
   assert.equal(encoded.bytes[1], 80);
   const decoded = await decodeApng(encoded.bytes);
+  assert.equal(decoded.name, fileLike.name);
+  assert.equal(decoded.frameCount, encoded.frameCount);
+  assert.deepEqual(decoded.bytes, source);
+});
+
+test("PNG 无损视频轨道可封装为 MOV 并还原", async () => {
+  const source = new Uint8Array(9000);
+  let state = 0x51f2a9c3;
+  for (let index = 0; index < source.length; index += 1) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    source[index] = state >>> 24;
+  }
+  const fileLike = {
+    name: "lossless.dat",
+    type: "application/octet-stream",
+    lastModified: 246813579,
+    arrayBuffer: async () => source.buffer.slice(0),
+  };
+  const encoded = await encodeFileToMov(fileLike, { resolution: 128, cellSize: 4, fps: 25 }, buildPalette().settings);
+  assert.equal(new TextDecoder().decode(encoded.bytes.subarray(4, 8)), "ftyp");
+  assert.equal(new TextDecoder().decode(encoded.bytes.subarray(8, 12)), "qt  ");
+  assert.ok(encoded.frameCount > 1);
+  const decoded = await decodeMov(encoded.bytes);
   assert.equal(decoded.name, fileLike.name);
   assert.equal(decoded.frameCount, encoded.frameCount);
   assert.deepEqual(decoded.bytes, source);

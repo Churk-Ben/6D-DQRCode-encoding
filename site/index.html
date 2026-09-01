@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <meta name="theme-color" content="#071019" />
-    <meta name="description" content="在浏览器本地将任意文件压缩并编码为无损 APNG，或从 APNG 完整还原原文件。" />
+    <meta name="description" content="在浏览器本地将任意文件压缩并编码为无损 APNG 或 MOV，或从编码媒体完整还原原文件。" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="6D DQRCode · 文件光场编解码器" />
-    <meta property="og:description" content="在浏览器本地将任意文件压缩并编码为无损 APNG，或从 APNG 完整还原原文件。" />
+    <meta property="og:description" content="在浏览器本地将任意文件压缩并编码为无损 APNG 或 MOV，或从编码媒体完整还原原文件。" />
     <meta property="og:image" content="./og.png" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="6D DQRCode · 文件光场编解码器" />
@@ -38,7 +38,7 @@
           <h1 id="page-title">把任意文件，变成一段<br /><em>可逆的彩色光场。</em></h1>
         </div>
         <div class="intro-copy">
-          <p>原文件先经浏览器原生 GZIP 压缩，再映射到形状、颜色、亮度与时间维度，输出标准无损 APNG。所有数据只在当前设备内流动。</p>
+          <p>原文件先经浏览器原生 GZIP 压缩，再映射到形状、颜色、亮度与时间维度，输出无损 APNG 或 MOV。所有数据只在当前设备内流动。</p>
           <div class="formula"><span>单帧位数</span><strong>R² · (1 + 6 / a²)</strong></div>
         </div>
       </section>
@@ -48,7 +48,7 @@
         <div class="workspace-main">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">FILE → GZIP → APNG</p>
+              <p class="eyebrow">FILE → GZIP → APNG / MOV</p>
               <h2 id="encode-heading">编码工作台</h2>
             </div>
             <p>推荐从 512 × 512、a = 8 开始。更小码元容量更高，更大码元轮廓更清晰。</p>
@@ -85,6 +85,13 @@
                 <span>播放帧率 <output id="fps-value">30 fps</output></span>
                 <input id="fps" type="range" min="5" max="60" step="5" value="30" />
               </label>
+              <label class="field">
+                <span>导出格式 <output id="format-value">APNG</output></span>
+                <select id="output-format">
+                  <option value="apng" selected>APNG · 索引色无损动画</option>
+                  <option value="mov">MOV · PNG 无损视频轨道</option>
+                </select>
+              </label>
               <div class="metrics" aria-live="polite">
                 <div><span>单帧净载荷</span><strong id="metric-capacity">—</strong></div>
                 <div><span>理论码率</span><strong id="metric-speed">—</strong></div>
@@ -110,7 +117,7 @@
 
           <div class="action-row">
             <button class="primary-button" id="encode-button" type="button" disabled><span>生成无损 APNG</span><b aria-hidden="true">→</b></button>
-            <p>定位点已写入左上、右上、左下。当前版本仅支持 APNG 文件直读解码，不启用移动端动态扫码。</p>
+            <p>定位点已写入左上、右上、左下。APNG 与 MOV 均可直接还原；MOV 使用逐帧 PNG 的无损视频轨道。暂不启用移动端动态扫码。</p>
           </div>
 
           <div class="job-status" id="encode-status" hidden>
@@ -122,9 +129,9 @@
             <div class="preview-frame"><canvas id="frame-preview" width="512" height="512"></canvas><span>FRAME 0001</span></div>
             <div class="result-copy">
               <p class="eyebrow">ENCODE VERIFIED</p>
-              <h3>APNG 已生成</h3>
+              <h3 id="media-result-title">APNG 已生成</h3>
               <dl id="encode-summary"></dl>
-              <a class="download-button" id="apng-download" download>下载 APNG <span>↓</span></a>
+              <a class="download-button" id="media-download" download><span id="media-download-label">下载 APNG</span><span>↓</span></a>
             </div>
           </div>
         </div>
@@ -135,16 +142,16 @@
         <div class="workspace-main">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">APNG → VERIFY → FILE</p>
+              <p class="eyebrow">APNG / MOV → VERIFY → FILE</p>
               <h2 id="decode-heading">还原原始文件</h2>
             </div>
-            <p>读取本站生成的 APNG，逐帧校验 CRC，解压后再比对 SHA-256；文件名、类型和修改时间一并恢复。</p>
+            <p>读取本站生成的 APNG 或 MOV，逐帧校验 CRC，解压后再比对 SHA-256；文件名、类型和修改时间一并恢复。</p>
           </div>
           <div class="decode-grid">
             <label class="dropzone decode-dropzone" id="decode-dropzone">
-              <input id="decode-file" type="file" accept=".png,.apng,image/png,image/apng" />
+              <input id="decode-file" type="file" accept=".png,.apng,.mov,image/png,image/apng,video/quicktime" />
               <span class="drop-icon" aria-hidden="true">↙</span>
-              <span class="drop-copy"><strong>选择 APNG</strong><small>支持拖放 · 仅解析本协议文件</small></span>
+              <span class="drop-copy"><strong>选择 APNG 或 MOV</strong><small>支持拖放 · 仅解析本协议文件</small></span>
               <span class="file-chip" id="decode-file-chip">尚未选择</span>
             </label>
             <div class="decode-action">
@@ -172,7 +179,7 @@
           <li><span>01</span><strong>压缩与封装</strong><p>GZIP 压缩后写入文件名、MIME、原尺寸与 SHA-256。</p></li>
           <li><span>02</span><strong>多维映射</strong><p>每个 a×a 码元保存 a² 个形状位和 6 个颜色亮度位。</p></li>
           <li><span>03</span><strong>逐帧保护</strong><p>每帧带序号、长度和 CRC32，可发现缺帧与像素损坏。</p></li>
-          <li><span>04</span><strong>无损还原</strong><p>APNG 索引色像素不经有损变换，最终以 SHA-256 验证原文。</p></li>
+          <li><span>04</span><strong>无损还原</strong><p>APNG 索引色或 MOV 的 PNG 视频帧均不经有损变换，最终以 SHA-256 验证原文。</p></li>
         </ol>
       </section>
     </main>

@@ -2,8 +2,8 @@ import {
   buildPalette,
   bytesToHex,
   calculateCapacity,
-  decodeApng,
-  encodeFileToApng,
+  decodeMedia,
+  encodeFileToMedia,
   paletteToRgba,
 } from "./codec.js";
 
@@ -11,17 +11,17 @@ const $ = (selector) => document.querySelector(selector);
 const elements = {
   encodeFile: $("#encode-file"), encodeDropzone: $("#encode-dropzone"), encodeChip: $("#encode-file-chip"),
   decodeFile: $("#decode-file"), decodeDropzone: $("#decode-dropzone"), decodeChip: $("#decode-file-chip"),
-  resolution: $("#resolution"), cellSize: $("#cell-size"), fps: $("#fps"),
+  resolution: $("#resolution"), cellSize: $("#cell-size"), fps: $("#fps"), outputFormat: $("#output-format"),
   hue: $("#hue"), saturation: $("#saturation"), lightness: $("#lightness"), contrast: $("#contrast"),
   palette: $("#palette"), encodeButton: $("#encode-button"), decodeButton: $("#decode-button"),
   encodeStatus: $("#encode-status"), encodeStatusText: $("#encode-status-text"), encodePercent: $("#encode-percent"), encodeProgress: $("#encode-progress"),
   decodeStatus: $("#decode-status"), decodeStatusText: $("#decode-status-text"), decodePercent: $("#decode-percent"), decodeProgress: $("#decode-progress"),
   encodeResult: $("#encode-result"), decodeResult: $("#decode-result"), canvas: $("#frame-preview"),
-  apngDownload: $("#apng-download"), fileDownload: $("#file-download"), toast: $("#toast"),
+  mediaDownload: $("#media-download"), fileDownload: $("#file-download"), toast: $("#toast"),
 };
 
 let sourceFile = null;
-let apngFile = null;
+let mediaFile = null;
 let encodeUrl = null;
 let decodeUrl = null;
 
@@ -52,6 +52,9 @@ function updateControls() {
   setOutput("#resolution-value", `${value.resolution} × ${value.resolution}`);
   setOutput("#cell-size-value", `${value.cellSize} px`);
   setOutput("#fps-value", `${value.fps} fps`);
+  const formatLabel = elements.outputFormat.value === "mov" ? "MOV" : "APNG";
+  setOutput("#format-value", formatLabel);
+  elements.encodeButton.querySelector("span").textContent = `生成无损 ${formatLabel}`;
   setOutput("#hue-value", `${elements.hue.value}°`);
   setOutput("#saturation-value", `${elements.saturation.value}%`);
   setOutput("#lightness-value", `${elements.lightness.value}%`);
@@ -96,7 +99,7 @@ function chooseFile(file, mode) {
     elements.encodeResult.hidden = true;
     updateControls();
   } else {
-    apngFile = file;
+    mediaFile = file;
     elements.decodeChip.textContent = `${file.name} · ${formatBytes(file.size)}`;
     elements.decodeChip.classList.add("ready");
     elements.decodeButton.disabled = false;
@@ -152,16 +155,20 @@ elements.encodeButton.addEventListener("click", async () => {
   elements.encodeButton.disabled = true;
   elements.encodeResult.hidden = true;
   try {
-    const result = await encodeFileToApng(sourceFile, config(), paletteConfig(), (update) => updateProgress("encode", update));
+    const format = elements.outputFormat.value;
+    const formatLabel = format === "mov" ? "MOV" : "APNG";
+    const result = await encodeFileToMedia(sourceFile, config(), paletteConfig(), format, (update) => updateProgress("encode", update));
     if (encodeUrl) URL.revokeObjectURL(encodeUrl);
     encodeUrl = URL.createObjectURL(result.blob);
-    elements.apngDownload.href = encodeUrl;
-    elements.apngDownload.download = `${sourceFile.name}.6d.apng`;
+    elements.mediaDownload.href = encodeUrl;
+    elements.mediaDownload.download = `${sourceFile.name}.6d.${format}`;
+    $("#media-download-label").textContent = `下载 ${formatLabel}`;
+    $("#media-result-title").textContent = `${formatLabel} 已生成`;
     renderPreview(result.firstFrameIndices, result.palette, result.capacity.resolution);
     const summary = $("#encode-summary");
     summary.replaceChildren();
     addSummaryItem(summary, "原始 / 压缩", `${formatBytes(result.originalSize)} / ${formatBytes(result.compressedSize)}`);
-    addSummaryItem(summary, "APNG 大小", formatBytes(result.bytes.length));
+    addSummaryItem(summary, `${formatLabel} 大小`, formatBytes(result.bytes.length));
     addSummaryItem(summary, "动画帧", `${result.frameCount} 帧 @ ${config().fps} fps`);
     addSummaryItem(summary, "SHA-256", `${bytesToHex(result.hash).slice(0, 20)}…`);
     elements.encodeResult.hidden = false;
@@ -171,11 +178,11 @@ elements.encodeButton.addEventListener("click", async () => {
 });
 
 elements.decodeButton.addEventListener("click", async () => {
-  if (!apngFile) return;
+  if (!mediaFile) return;
   elements.decodeButton.disabled = true;
   elements.decodeResult.hidden = true;
   try {
-    const result = await decodeApng(await apngFile.arrayBuffer(), (update) => updateProgress("decode", update));
+    const result = await decodeMedia(await mediaFile.arrayBuffer(), (update) => updateProgress("decode", update));
     if (decodeUrl) URL.revokeObjectURL(decodeUrl);
     decodeUrl = URL.createObjectURL(new Blob([result.bytes], { type: result.type || "application/octet-stream" }));
     elements.fileDownload.href = decodeUrl;
@@ -187,7 +194,7 @@ elements.decodeButton.addEventListener("click", async () => {
   finally { elements.decodeButton.disabled = false; }
 });
 
-for (const element of [elements.resolution, elements.cellSize, elements.fps, elements.hue, elements.saturation, elements.lightness, elements.contrast]) element.addEventListener("input", updateControls);
+for (const element of [elements.resolution, elements.cellSize, elements.fps, elements.outputFormat, elements.hue, elements.saturation, elements.lightness, elements.contrast]) element.addEventListener("input", updateControls);
 $("#palette-reset").addEventListener("click", () => {
   elements.hue.value = 198;
   elements.saturation.value = 82;

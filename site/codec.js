@@ -308,15 +308,11 @@ function makeFCTL(sequence, width, height, fps) {
   return data;
 }
 
-export async function encodeFileToApng(file, config, paletteOptions, onProgress = () => {}) {
-  const capacity = calculateCapacity(config);
-  const container = await createContainer(file, onProgress);
-  const frameCount = Math.max(1, Math.ceil(container.bytes.length / capacity.payloadBytes));
-  if (frameCount > 10000) throw new Error("所需帧数超过 10,000，请提高分辨率、减小码元或选择更小的文件。");
-  const { palette, settings } = buildPalette(paletteOptions);
-  const metadata = textEncoder.encode(JSON.stringify({
+function makeEncodingMetadata(capacity, config, settings, mediaFormat) {
+  return textEncoder.encode(JSON.stringify({
     signature: "6D-DQRCODE",
     version: FORMAT_VERSION,
+    mediaFormat,
     resolution: capacity.resolution,
     cellSize: capacity.cellSize,
     grid: capacity.grid,
@@ -325,6 +321,157 @@ export async function encodeFileToApng(file, config, paletteOptions, onProgress 
     compression: "gzip",
     palette: settings,
   }));
+}
+
+async function makeStandalonePng(indices, palette, metadata, resolution) {
+  const compressedFrame = await zlib(indicesToScanlines(indices, resolution, resolution));
+  return concatBytes([
+    PNG_SIGNATURE,
+    pngChunk("IHDR", makeIHDR(resolution, resolution)),
+    pngChunk("PLTE", palette),
+    pngChunk("dqRC", metadata),
+    pngChunk("IDAT", compressedFrame),
+    pngChunk("IEND", new Uint8Array()),
+  ]);
+}
+
+function movAtom(type, ...parts) {
+  const data = concatBytes(parts);
+  if (data.length + 8 > 0xffffffff) throw new Error("MOV 数据块超过 32 位容器限制。");
+  const output = new Uint8Array(data.length + 8);
+  const view = new DataView(output.buffer);
+  view.setUint32(0, output.length, false);
+  output.set(textEncoder.encode(type), 4);
+  output.set(data, 8);
+  return output;
+}
+
+function movMatrix(view, offset) {
+  const matrix = [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];
+  matrix.forEach((value, index) => view.setUint32(offset + index * 4, value, false));
+}
+
+function makeMvhd(timescale, duration) {
+  const data = new Uint8Array(100);
+  const view = new DataView(data.buffer);
+  view.setUint32(12, timescale, false);
+  view.setUint32(16, duration, false);
+  view.setUint32(20, 0x00010000, false);
+  view.setUint16(24, 0x0100, false);
+  movMatrix(view, 36);
+  view.setUint32(96, 2, false);
+  return movAtom("mvhd", data);
+}
+
+function makeTkhd(width, height, duration) {
+  const data = new Uint8Array(84);
+  const view = new DataView(data.buffer);
+  view.setUint32(0, 7, false);
+  view.setUint32(12, 1, false);
+  view.setUint32(20, duration, false);
+  movMatrix(view, 40);
+  view.setUint32(76, width << 16, false);
+  view.setUint32(80, height << 16, false);
+  return movAtom("tkhd", data);
+}
+
+function makeMdhd(timescale, duration) {
+  const data = new Uint8Array(24);
+  const view = new DataView(data.buffer);
+  view.setUint32(12, timescale, false);
+  view.setUint32(16, duration, false);
+  view.setUint16(20, 0x55c4, false); // und
+  return movAtom("mdhd", data);
+}
+
+function makeHdlr() {
+  const name = textEncoder.encode("VideoHandler\0");
+  const data = new Uint8Array(24 + name.length);
+  data.set(textEncoder.encode("vide"), 8);
+  data.set(name, 24);
+  return movAtom("hdlr", data);
+}
+
+function makeVisualSampleEntry(width, height) {
+  const data = new Uint8Array(78);
+  const view = new DataView(data.buffer);
+  view.setUint16(6, 1, false);
+  view.setUint16(24, width, false);
+  view.setUint16(26, height, false);
+  view.setUint32(28, 0x00480000, false);
+  view.setUint32(32, 0x00480000, false);
+  view.setUint16(40, 1, false);
+  const compressor = textEncoder.encode("PNG lossless");
+  data[42] = compressor.length;
+  data.set(compressor, 43);
+  view.setUint16(74, 24, false);
+  view.setUint16(76, 0xffff, false);
+  return movAtom("png ", data);
+}
+
+function makeStbl(width, height, sampleSizes, firstSampleOffset) {
+  const stsdData = new Uint8Array(8);
+  new DataView(stsdData.buffer).setUint32(4, 1, false);
+  const stsd = movAtom("stsd", stsdData, makeVisualSampleEntry(width, height));
+
+  const sttsData = new Uint8Array(16);
+  const sttsView = new DataView(sttsData.buffer);
+  sttsView.setUint32(4, 1, false);
+  sttsView.setUint32(8, sampleSizes.length, false);
+  sttsView.setUint32(12, 1, false);
+
+  const stscData = new Uint8Array(20);
+  const stscView = new DataView(stscData.buffer);
+  stscView.setUint32(4, 1, false);
+  stscView.setUint32(8, 1, false);
+  stscView.setUint32(12, sampleSizes.length, false);
+  stscView.setUint32(16, 1, false);
+
+  const stszData = new Uint8Array(12 + sampleSizes.length * 4);
+  const stszView = new DataView(stszData.buffer);
+  stszView.setUint32(8, sampleSizes.length, false);
+  sampleSizes.forEach((size, index) => stszView.setUint32(12 + index * 4, size, false));
+
+  const stcoData = new Uint8Array(12);
+  const stcoView = new DataView(stcoData.buffer);
+  stcoView.setUint32(4, 1, false);
+  stcoView.setUint32(8, firstSampleOffset, false);
+  return movAtom("stbl", stsd, movAtom("stts", sttsData), movAtom("stsc", stscData), movAtom("stsz", stszData), movAtom("stco", stcoData));
+}
+
+function makeMov(samples, width, height, fps) {
+  const ftypData = new Uint8Array(12);
+  ftypData.set(textEncoder.encode("qt  "), 0);
+  new DataView(ftypData.buffer).setUint32(4, 0x20050300, false);
+  ftypData.set(textEncoder.encode("qt  "), 8);
+  const ftyp = movAtom("ftyp", ftypData);
+  const sampleData = concatBytes(samples);
+  const firstSampleOffset = ftyp.length + 8;
+  const mdat = movAtom("mdat", sampleData);
+  const timescale = Math.max(1, Math.min(65535, Math.round(fps)));
+
+  const vmhdData = new Uint8Array(12);
+  new DataView(vmhdData.buffer).setUint32(0, 1, false);
+  const urlData = new Uint8Array(4);
+  new DataView(urlData.buffer).setUint32(0, 1, false);
+  const drefData = new Uint8Array(8);
+  new DataView(drefData.buffer).setUint32(4, 1, false);
+  const dinf = movAtom("dinf", movAtom("dref", drefData, movAtom("url ", urlData)));
+  const stbl = makeStbl(width, height, samples.map((sample) => sample.length), firstSampleOffset);
+  const minf = movAtom("minf", movAtom("vmhd", vmhdData), dinf, stbl);
+  const mdia = movAtom("mdia", makeMdhd(timescale, samples.length), makeHdlr(), minf);
+  const trak = movAtom("trak", makeTkhd(width, height, samples.length), mdia);
+  const moov = movAtom("moov", makeMvhd(timescale, samples.length), trak);
+  return concatBytes([ftyp, mdat, moov]);
+}
+
+export async function encodeFileToApng(file, config, paletteOptions, onProgress = () => {}) {
+  const capacity = calculateCapacity(config);
+  const container = await createContainer(file, onProgress);
+  const frameCount = Math.max(1, Math.ceil(container.bytes.length / capacity.payloadBytes));
+  if (frameCount > 10000) throw new Error("所需帧数超过 10,000，请提高分辨率、减小码元或选择更小的文件。");
+  const { palette, settings } = buildPalette(paletteOptions);
+  const metadata = makeEncodingMetadata(capacity, config, settings, "apng");
   const chunks = [PNG_SIGNATURE, pngChunk("IHDR", makeIHDR(capacity.resolution, capacity.resolution)), pngChunk("PLTE", palette), pngChunk("dqRC", metadata)];
   const animation = new Uint8Array(8);
   const animationView = new DataView(animation.buffer);
@@ -358,6 +505,34 @@ export async function encodeFileToApng(file, config, paletteOptions, onProgress 
   return { ...container, bytes, blob: new Blob([bytes], { type: "image/apng" }), frameCount, capacity, firstFrameIndices, palette };
 }
 
+export async function encodeFileToMov(file, config, paletteOptions, onProgress = () => {}) {
+  const capacity = calculateCapacity(config);
+  const container = await createContainer(file, onProgress);
+  const frameCount = Math.max(1, Math.ceil(container.bytes.length / capacity.payloadBytes));
+  if (frameCount > 10000) throw new Error("所需帧数超过 10,000，请提高分辨率、减小码元或选择更小的文件。");
+  const { palette, settings } = buildPalette(paletteOptions);
+  const metadata = makeEncodingMetadata(capacity, config, settings, "mov-png");
+  const samples = [];
+  let firstFrameIndices;
+  for (let index = 0; index < frameCount; index += 1) {
+    const start = index * capacity.payloadBytes;
+    const payload = container.bytes.subarray(start, Math.min(container.bytes.length, start + capacity.payloadBytes));
+    const indices = renderFrame(framePacket(payload, index, frameCount), capacity);
+    if (index === 0) firstFrameIndices = indices.slice();
+    samples.push(await makeStandalonePng(indices, palette, metadata, capacity.resolution));
+    onProgress({ phase: "encode", progress: 0.1 + 0.86 * ((index + 1) / frameCount), message: `正在生成 MOV 无损帧：${index + 1} / ${frameCount}` });
+    if (index % 4 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  const bytes = makeMov(samples, capacity.resolution, capacity.resolution, Number(config.fps));
+  onProgress({ phase: "done", progress: 1, message: "MOV 编码完成，PNG 无损视频轨道已封装。" });
+  return { ...container, bytes, blob: new Blob([bytes], { type: "video/quicktime" }), frameCount, capacity, firstFrameIndices, palette, format: "mov" };
+}
+
+export function encodeFileToMedia(file, config, paletteOptions, format = "apng", onProgress = () => {}) {
+  if (format === "mov") return encodeFileToMov(file, config, paletteOptions, onProgress);
+  return encodeFileToApng(file, config, paletteOptions, onProgress);
+}
+
 function parseChunks(bytes) {
   if (bytes.length < 8 || !bytesEqual(bytes.subarray(0, 8), PNG_SIGNATURE)) throw new Error("不是有效的 PNG/APNG 文件。");
   const chunks = [];
@@ -388,6 +563,79 @@ function scanlinesToIndices(raw, width, height) {
   return indices;
 }
 
+async function decodeStandalonePng(bytes) {
+  const chunks = parseChunks(bytes);
+  const ihdr = chunks.find((chunk) => chunk.type === "IHDR");
+  const metadataChunk = chunks.find((chunk) => chunk.type === "dqRC");
+  const idat = chunks.filter((chunk) => chunk.type === "IDAT");
+  if (!ihdr || !metadataChunk || !idat.length) throw new Error("MOV 帧缺少 PNG 图像数据或 6D-DQRCode 元数据。");
+  const view = new DataView(ihdr.data.buffer, ihdr.data.byteOffset, ihdr.data.byteLength);
+  const width = view.getUint32(0, false);
+  const height = view.getUint32(4, false);
+  if (width !== height || view.getUint8(8) !== 8 || view.getUint8(9) !== 3) throw new Error("MOV 中包含不受支持的 PNG 帧格式。");
+  let metadata;
+  try { metadata = JSON.parse(textDecoder.decode(metadataChunk.data)); } catch { throw new Error("MOV 帧的编码参数元数据无法解析。"); }
+  const raw = await zlib(concatBytes(idat.map((chunk) => chunk.data)), true);
+  return { metadata, indices: scanlinesToIndices(raw, width, height), width, height };
+}
+
+function parseMovAtoms(bytes) {
+  const atoms = [];
+  let offset = 0;
+  while (offset + 8 <= bytes.length) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset + offset, bytes.byteLength - offset);
+    let size = view.getUint32(0, false);
+    const type = textDecoder.decode(bytes.subarray(offset + 4, offset + 8));
+    if (size === 1) throw new Error("暂不支持 64 位扩展尺寸的 MOV 数据块。");
+    if (size === 0) size = bytes.length - offset;
+    if (size < 8 || offset + size > bytes.length) throw new Error(`MOV 数据块 ${type} 不完整。`);
+    atoms.push({ type, data: bytes.subarray(offset + 8, offset + size), offset, size });
+    offset += size;
+  }
+  if (offset !== bytes.length) throw new Error("MOV 末尾存在无法解析的数据。");
+  return atoms;
+}
+
+function movChild(atom, type) {
+  const child = parseMovAtoms(atom.data).find((item) => item.type === type);
+  if (!child) throw new Error(`MOV 缺少 ${type} 数据块。`);
+  return child;
+}
+
+function extractMovSamples(bytes) {
+  const top = parseMovAtoms(bytes);
+  const ftyp = top.find((atom) => atom.type === "ftyp");
+  const moov = top.find((atom) => atom.type === "moov");
+  if (!ftyp || !moov || textDecoder.decode(ftyp.data.subarray(0, 4)) !== "qt  ") throw new Error("不是受支持的 QuickTime MOV 文件。");
+  const trak = movChild(moov, "trak");
+  const mdia = movChild(trak, "mdia");
+  const minf = movChild(mdia, "minf");
+  const stbl = movChild(minf, "stbl");
+  const stsz = movChild(stbl, "stsz");
+  const stco = movChild(stbl, "stco");
+  if (stsz.data.length < 12 || stco.data.length < 12) throw new Error("MOV 样本表不完整。");
+  const sizeView = new DataView(stsz.data.buffer, stsz.data.byteOffset, stsz.data.byteLength);
+  const uniformSize = sizeView.getUint32(4, false);
+  const count = sizeView.getUint32(8, false);
+  if (!count || count > 10000) throw new Error("MOV 帧数无效或超过 10,000 帧限制。");
+  const sampleSizes = [];
+  if (uniformSize) {
+    for (let index = 0; index < count; index += 1) sampleSizes.push(uniformSize);
+  } else {
+    if (stsz.data.length < 12 + count * 4) throw new Error("MOV 帧尺寸表不完整。");
+    for (let index = 0; index < count; index += 1) sampleSizes.push(sizeView.getUint32(12 + index * 4, false));
+  }
+  const chunkView = new DataView(stco.data.buffer, stco.data.byteOffset, stco.data.byteLength);
+  if (chunkView.getUint32(4, false) !== 1) throw new Error("暂不支持多区块 MOV 文件；请使用本站生成的 MOV。");
+  let offset = chunkView.getUint32(8, false);
+  return sampleSizes.map((size) => {
+    if (!size || offset + size > bytes.length) throw new Error("MOV 帧数据超出文件范围。");
+    const sample = bytes.subarray(offset, offset + size);
+    offset += size;
+    return sample;
+  });
+}
+
 export function decodeFrame(indices, config) {
   const capacity = calculateCapacity(config);
   const output = new Uint8Array(capacity.frameBytes);
@@ -407,7 +655,7 @@ export function decodeFrame(indices, config) {
         const row = (cellY * capacity.cellSize + py) * capacity.resolution + cellX * capacity.cellSize;
         for (let px = 0; px < capacity.cellSize; px += 1) {
           const paletteIndex = indices[row + px];
-          if (paletteIndex > 127 || (paletteIndex >>> 1) !== state) throw new Error("码元颜色状态不一致，APNG 可能被有损转码。");
+          if (paletteIndex > 127 || (paletteIndex >>> 1) !== state) throw new Error("码元颜色状态不一致，媒体文件可能被有损转码。");
           writeBit(paletteIndex & 1);
         }
       }
@@ -471,6 +719,35 @@ export async function decodeApng(input, onProgress = () => {}) {
   const result = await parseContainer(concatBytes(packets));
   onProgress({ phase: "done", progress: 1, message: "解码成功，原始文件完整性校验通过。" });
   return { ...result, frameCount: expectedFrames, metadata };
+}
+
+export async function decodeMov(input, onProgress = () => {}) {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  const samples = extractMovSamples(bytes);
+  const packets = new Array(samples.length);
+  let metadata;
+  for (let index = 0; index < samples.length; index += 1) {
+    const decoded = await decodeStandalonePng(samples[index]);
+    if (!metadata) metadata = decoded.metadata;
+    if (metadata.signature !== "6D-DQRCODE" || metadata.version !== FORMAT_VERSION || metadata.resolution !== decoded.width) throw new Error("MOV 帧不是受支持的 6D-DQRCode 编码格式。");
+    const frame = parseFramePacket(decodeFrame(decoded.indices, metadata));
+    if (frame.total !== samples.length || frame.index >= samples.length || packets[frame.index]) throw new Error("MOV 帧编号重复或与视频样本数不匹配。");
+    packets[frame.index] = frame.payload;
+    onProgress({ phase: "decode", progress: 0.05 + 0.82 * ((index + 1) / samples.length), message: `正在解析 MOV：${index + 1} / ${samples.length} 帧` });
+    if (index % 4 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  if (packets.some((packet) => !packet)) throw new Error("MOV 缺少部分数据帧。");
+  onProgress({ phase: "verify", progress: 0.9, message: "正在解压并核对 SHA-256…" });
+  const result = await parseContainer(concatBytes(packets));
+  onProgress({ phase: "done", progress: 1, message: "MOV 解码成功，原始文件完整性校验通过。" });
+  return { ...result, frameCount: samples.length, metadata, mediaFormat: "mov" };
+}
+
+export function decodeMedia(input, onProgress = () => {}) {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  if (bytes.length >= 8 && bytesEqual(bytes.subarray(0, 8), PNG_SIGNATURE)) return decodeApng(bytes, onProgress);
+  if (bytes.length >= 12 && textDecoder.decode(bytes.subarray(4, 8)) === "ftyp") return decodeMov(bytes, onProgress);
+  throw new Error("请选择本站生成的 APNG 或 MOV 文件。");
 }
 
 export function paletteToRgba(palette, indices) {
