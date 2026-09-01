@@ -1,0 +1,67 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  buildPalette,
+  calculateCapacity,
+  createContainerFromBytes,
+  decodeApng,
+  decodeFrame,
+  encodeFileToApng,
+  parseContainer,
+  renderFrame,
+} from "../site/codec.js";
+
+if (!globalThis.crypto) globalThis.crypto = (await import("node:crypto")).webcrypto;
+
+test("码元帧映射可逐位往返", () => {
+  const config = { resolution: 128, cellSize: 4, fps: 30 };
+  const capacity = calculateCapacity(config);
+  const packet = new Uint8Array(capacity.frameBytes);
+  for (let index = 0; index < packet.length; index += 1) packet[index] = (index * 73 + 19) & 0xff;
+  const pixels = renderFrame(packet, config);
+  assert.deepEqual(decodeFrame(pixels, config), packet);
+});
+
+test("1px 码元可承载 1 个形状位和 6 个颜色亮度位", () => {
+  const config = { resolution: 128, cellSize: 1, fps: 60 };
+  const capacity = calculateCapacity(config);
+  assert.equal(capacity.bitsPerCell, 7);
+  const packet = new Uint8Array(capacity.frameBytes);
+  for (let index = 0; index < packet.length; index += 1) packet[index] = (index * 149 + 37) & 0xff;
+  assert.deepEqual(decodeFrame(renderFrame(packet, config), config), packet);
+});
+
+test("文件容器经 GZIP 和 SHA-256 校验后可还原", async () => {
+  const source = new TextEncoder().encode("6D-DQRCode 无损容器测试\n".repeat(200));
+  const container = await createContainerFromBytes({ bytes: source, name: "论证.txt", type: "text/plain", lastModified: 123456789 });
+  assert.ok(container.compressedSize < container.originalSize);
+  const restored = await parseContainer(container.bytes);
+  assert.equal(restored.name, "论证.txt");
+  assert.equal(restored.type, "text/plain");
+  assert.equal(restored.lastModified, 123456789);
+  assert.deepEqual(restored.bytes, source);
+});
+
+test("完整 APNG 编码和解码可跨多帧往返", async () => {
+  const source = new Uint8Array(20000);
+  let state = 0x6d3a2f19;
+  for (let index = 0; index < source.length; index += 1) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    source[index] = state & 0xff;
+  }
+  const fileLike = {
+    name: "sample.bin",
+    type: "application/octet-stream",
+    lastModified: 987654321,
+    arrayBuffer: async () => source.buffer.slice(0),
+  };
+  const encoded = await encodeFileToApng(fileLike, { resolution: 128, cellSize: 4, fps: 24 }, buildPalette().settings);
+  assert.ok(encoded.frameCount > 1);
+  assert.equal(encoded.bytes[1], 80);
+  const decoded = await decodeApng(encoded.bytes);
+  assert.equal(decoded.name, fileLike.name);
+  assert.equal(decoded.frameCount, encoded.frameCount);
+  assert.deepEqual(decoded.bytes, source);
+});

@@ -162,3 +162,38 @@ B*{\text{frame}} = N \cdot I\_{\text{symbol}} = \frac{R^2}{a^2} (a^2 + 6)
 ---
 
 _本报告完全基于对话历史中用户定义的编码模型撰写，所有数学推导均已验证。_
+
+---
+
+## 浏览器编解码器
+
+仓库的 [`site/`](./site/) 是一个不依赖后端和构建工具的静态网页，实现了：
+
+- 任意类型文件 → 浏览器原生 GZIP 压缩 → 6D 码元映射 → 无损索引色 APNG；
+- APNG → 逐帧 CRC32 校验 → GZIP 解压 → SHA-256 校验 → 原文件；
+- 分辨率、码元边长、帧率以及 8×8 颜色/亮度调色板的可视化调节；
+- 左上、右上、左下三个 7×7 定位点。定位结构已预留，但当前版本不支持摄像头或移动端动态扫码。
+
+所有文件数据均在浏览器本地处理，不会上传到服务器。推荐使用最新版 Chrome、Edge 或 Firefox。大文件会在浏览器内产生明显大于原文件的 APNG，这是像素载荷密度与无损图像容器共同决定的正常开销。
+
+### 本地预览
+
+在仓库根目录启动任意静态文件服务器，例如：
+
+```bash
+python -m http.server 8080 --directory site
+```
+
+然后访问 `http://localhost:8080`。直接双击 `index.html` 也可使用，但静态服务器具有更一致的 ES Module 兼容性。
+
+### GitHub Pages 部署
+
+`.github/workflows/pages.yml` 已配置为在 `main` 分支推送时部署 `site/`。首次使用时，在仓库 **Settings → Pages → Build and deployment → Source** 中选择 **GitHub Actions**，随后推送即可。
+
+### 自动化测试
+
+```bash
+node --test tests/codec.test.mjs
+```
+
+测试覆盖码元逐位往返、GZIP/SHA-256 容器校验和多帧 APNG 完整往返。

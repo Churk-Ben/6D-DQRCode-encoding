@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <meta name="theme-color" content="#071019" />
+    <meta name="description" content="在浏览器本地将任意文件压缩并编码为无损 APNG，或从 APNG 完整还原原文件。" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="6D DQRCode · 文件光场编解码器" />
+    <meta property="og:description" content="在浏览器本地将任意文件压缩并编码为无损 APNG，或从 APNG 完整还原原文件。" />
+    <meta property="og:image" content="./og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="6D DQRCode · 文件光场编解码器" />
+    <meta name="twitter:description" content="纯静态、零上传的文件光场编解码器。" />
+    <meta name="twitter:image" content="./og.png" />
+    <title>6D DQRCode · 文件光场编解码器</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="6D DQRCode 首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>6D DQRCODE</span>
+      </a>
+      <nav aria-label="页面导航">
+        <a href="#encoder">编码器</a>
+        <a href="#decoder">解码器</a>
+        <a href="#protocol">协议说明</a>
+      </nav>
+      <span class="local-badge"><span></span> 本地处理</span>
+    </header>
+
+    <main id="top">
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">LOSSLESS OPTICAL DATA CONTAINER / V1</p>
+          <h1 id="page-title">把任意文件，变成一段<br /><em>可逆的彩色光场。</em></h1>
+        </div>
+        <div class="intro-copy">
+          <p>原文件先经浏览器原生 GZIP 压缩，再映射到形状、颜色、亮度与时间维度，输出标准无损 APNG。所有数据只在当前设备内流动。</p>
+          <div class="formula"><span>单帧位数</span><strong>R² · (1 + 6 / a²)</strong></div>
+        </div>
+      </section>
+
+      <section class="workspace" id="encoder" aria-labelledby="encode-heading">
+        <div class="section-index" aria-hidden="true">01</div>
+        <div class="workspace-main">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">FILE → GZIP → APNG</p>
+              <h2 id="encode-heading">编码工作台</h2>
+            </div>
+            <p>推荐从 512 × 512、a = 8 开始。更小码元容量更高，更大码元轮廓更清晰。</p>
+          </div>
+
+          <label class="dropzone" id="encode-dropzone">
+            <input id="encode-file" type="file" />
+            <span class="drop-icon" aria-hidden="true">↗</span>
+            <span class="drop-copy">
+              <strong>选择任意文件</strong>
+              <small>或拖放到这里 · 数据不会上传</small>
+            </span>
+            <span class="file-chip" id="encode-file-chip">尚未选择</span>
+          </label>
+
+          <div class="controls-grid">
+            <fieldset class="control-panel">
+              <legend>几何与时间</legend>
+              <label class="field">
+                <span>画面分辨率 <output id="resolution-value">512 × 512</output></span>
+                <select id="resolution">
+                  <option value="256">256 × 256</option>
+                  <option value="384">384 × 384</option>
+                  <option value="512" selected>512 × 512</option>
+                  <option value="768">768 × 768</option>
+                  <option value="1024">1024 × 1024</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>码元边长 a <output id="cell-size-value">8 px</output></span>
+                <input id="cell-size" type="range" min="1" max="16" step="1" value="8" />
+              </label>
+              <label class="field">
+                <span>播放帧率 <output id="fps-value">30 fps</output></span>
+                <input id="fps" type="range" min="5" max="60" step="5" value="30" />
+              </label>
+              <div class="metrics" aria-live="polite">
+                <div><span>单帧净载荷</span><strong id="metric-capacity">—</strong></div>
+                <div><span>理论码率</span><strong id="metric-speed">—</strong></div>
+                <div><span>预计帧数</span><strong id="metric-frames">—</strong></div>
+              </div>
+            </fieldset>
+
+            <fieldset class="control-panel palette-panel">
+              <legend>颜色 × 亮度</legend>
+              <div class="palette-header">
+                <p>64 个基础状态；每格的两级明暗额外承载形状位。</p>
+                <button class="text-button" id="palette-reset" type="button">恢复推荐值</button>
+              </div>
+              <div class="palette" id="palette" aria-label="8 种色相与 8 级亮度的可视化调色板"></div>
+              <div class="compact-controls">
+                <label><span>色相起点 <output id="hue-value">198°</output></span><input id="hue" type="range" min="0" max="359" value="198" /></label>
+                <label><span>饱和度 <output id="saturation-value">82%</output></span><input id="saturation" type="range" min="35" max="100" value="82" /></label>
+                <label><span>明度跨度 <output id="lightness-value">58%</output></span><input id="lightness" type="range" min="30" max="72" value="58" /></label>
+                <label><span>形状对比 <output id="contrast-value">10%</output></span><input id="contrast" type="range" min="2" max="20" value="10" /></label>
+              </div>
+            </fieldset>
+          </div>
+
+          <div class="action-row">
+            <button class="primary-button" id="encode-button" type="button" disabled><span>生成无损 APNG</span><b aria-hidden="true">→</b></button>
+            <p>定位点已写入左上、右上、左下。当前版本仅支持 APNG 文件直读解码，不启用移动端动态扫码。</p>
+          </div>
+
+          <div class="job-status" id="encode-status" hidden>
+            <div class="status-line"><span id="encode-status-text">准备中…</span><strong id="encode-percent">0%</strong></div>
+            <div class="progress-track"><i id="encode-progress"></i></div>
+          </div>
+
+          <div class="result-panel" id="encode-result" hidden>
+            <div class="preview-frame"><canvas id="frame-preview" width="512" height="512"></canvas><span>FRAME 0001</span></div>
+            <div class="result-copy">
+              <p class="eyebrow">ENCODE VERIFIED</p>
+              <h3>APNG 已生成</h3>
+              <dl id="encode-summary"></dl>
+              <a class="download-button" id="apng-download" download>下载 APNG <span>↓</span></a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace decoder" id="decoder" aria-labelledby="decode-heading">
+        <div class="section-index" aria-hidden="true">02</div>
+        <div class="workspace-main">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">APNG → VERIFY → FILE</p>
+              <h2 id="decode-heading">还原原始文件</h2>
+            </div>
+            <p>读取本站生成的 APNG，逐帧校验 CRC，解压后再比对 SHA-256；文件名、类型和修改时间一并恢复。</p>
+          </div>
+          <div class="decode-grid">
+            <label class="dropzone decode-dropzone" id="decode-dropzone">
+              <input id="decode-file" type="file" accept=".png,.apng,image/png,image/apng" />
+              <span class="drop-icon" aria-hidden="true">↙</span>
+              <span class="drop-copy"><strong>选择 APNG</strong><small>支持拖放 · 仅解析本协议文件</small></span>
+              <span class="file-chip" id="decode-file-chip">尚未选择</span>
+            </label>
+            <div class="decode-action">
+              <button class="primary-button" id="decode-button" type="button" disabled><span>校验并还原文件</span><b aria-hidden="true">→</b></button>
+              <div class="job-status" id="decode-status" hidden>
+                <div class="status-line"><span id="decode-status-text">准备中…</span><strong id="decode-percent">0%</strong></div>
+                <div class="progress-track"><i id="decode-progress"></i></div>
+              </div>
+              <div class="decode-result" id="decode-result" hidden>
+                <span class="verified-mark">✓</span>
+                <div><strong id="decoded-name">—</strong><small id="decoded-meta">—</small></div>
+                <a id="file-download" class="download-button" download>下载原文件 <span>↓</span></a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="protocol" id="protocol" aria-labelledby="protocol-heading">
+        <div>
+          <p class="eyebrow">PROTOCOL NOTES</p>
+          <h2 id="protocol-heading">它如何保持可逆</h2>
+        </div>
+        <ol>
+          <li><span>01</span><strong>压缩与封装</strong><p>GZIP 压缩后写入文件名、MIME、原尺寸与 SHA-256。</p></li>
+          <li><span>02</span><strong>多维映射</strong><p>每个 a×a 码元保存 a² 个形状位和 6 个颜色亮度位。</p></li>
+          <li><span>03</span><strong>逐帧保护</strong><p>每帧带序号、长度和 CRC32，可发现缺帧与像素损坏。</p></li>
+          <li><span>04</span><strong>无损还原</strong><p>APNG 索引色像素不经有损变换，最终以 SHA-256 验证原文。</p></li>
+        </ol>
+      </section>
+    </main>
+
+    <footer><span>6D DQRCODE / OPEN PROTOCOL EXPERIMENT</span><span>纯静态 · 零上传 · 浏览器内运行</span></footer>
+    <div class="toast" id="toast" role="alert" hidden></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
