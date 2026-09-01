@@ -465,6 +465,127 @@ function makeMov(samples, width, height, fps) {
   return concatBytes([ftyp, mdat, moov]);
 }
 
+function riffChunk(type, data) {
+  const padding = data.length & 1;
+  const output = new Uint8Array(8 + data.length + padding);
+  const view = new DataView(output.buffer);
+  output.set(textEncoder.encode(type), 0);
+  view.setUint32(4, data.length, true);
+  output.set(data, 8);
+  return output;
+}
+
+function riffList(type, ...children) {
+  return riffChunk("LIST", concatBytes([textEncoder.encode(type), ...children]));
+}
+
+function riffFile(type, ...children) {
+  const data = concatBytes([textEncoder.encode(type), ...children]);
+  const padding = data.length & 1;
+  const output = new Uint8Array(8 + data.length + padding);
+  const view = new DataView(output.buffer);
+  view.setUint32(4, data.length, true);
+  output.set(textEncoder.encode("RIFF"), 0);
+  output.set(data, 8);
+  return output;
+}
+
+function makeAviFrame(indices, width, height) {
+  const rowStride = (width + 3) & ~3;
+  const output = new Uint8Array(rowStride * height);
+  for (let outputY = 0; outputY < height; outputY += 1) {
+    const sourceY = height - 1 - outputY;
+    const sourceRow = sourceY * width;
+    const targetRow = outputY * rowStride;
+    output.set(indices.subarray(sourceRow, sourceRow + width), targetRow);
+  }
+  return output;
+}
+
+function makeAviHeader(width, height, fps, frameCount, frameSize) {
+  const data = new Uint8Array(56);
+  const view = new DataView(data.buffer);
+  view.setUint32(0, Math.round(1_000_000 / Math.max(1, fps)), true);
+  view.setUint32(4, Math.min(0xffffffff, frameSize * Math.max(1, fps)), true);
+  view.setUint32(12, 0x10, true); // AVIF_HASINDEX
+  view.setUint32(16, frameCount, true);
+  view.setUint32(20, 0, true);
+  view.setUint32(24, 1, true);
+  view.setUint32(28, frameSize, true);
+  view.setUint32(32, width, true);
+  view.setUint32(36, height, true);
+  return riffChunk("avih", data);
+}
+
+function makeAviStreamHeader(width, height, fps, frameCount, frameSize) {
+  const data = new Uint8Array(56);
+  const view = new DataView(data.buffer);
+  data.set(textEncoder.encode("vids"), 0);
+  data.set(textEncoder.encode("DIB "), 4); // BI_RGB / uncompressed DIB
+  view.setUint32(20, 1, true);
+  view.setUint32(24, Math.max(1, Math.round(fps)), true);
+  view.setUint32(32, frameCount, true);
+  view.setUint32(36, frameSize, true);
+  view.setUint32(40, 0xffffffff, true);
+  view.setUint32(44, 0, true);
+  view.setUint16(48, 0, true);
+  view.setUint16(50, 0, true);
+  view.setUint16(52, width, true);
+  view.setUint16(54, height, true);
+  return riffChunk("strh", data);
+}
+
+function makeAviBitmapInfo(width, height, frameSize, palette) {
+  const colorCount = 256;
+  const data = new Uint8Array(40 + colorCount * 4);
+  const view = new DataView(data.buffer);
+  view.setUint32(0, 40, true);
+  view.setInt32(4, width, true);
+  view.setInt32(8, height, true); // bottom-up 8-bit indexed DIB
+  view.setUint16(12, 1, true);
+  view.setUint16(14, 8, true);
+  view.setUint32(16, 0, true); // BI_RGB
+  view.setUint32(20, frameSize, true);
+  view.setInt32(24, 2835, true);
+  view.setInt32(28, 2835, true);
+  view.setUint32(32, colorCount, true);
+  view.setUint32(36, colorCount, true);
+  for (let index = 0; index < Math.min(colorCount, palette.length / 3); index += 1) {
+    const paletteOffset = index * 3;
+    const tableOffset = 40 + index * 4;
+    data[tableOffset] = palette[paletteOffset + 2];
+    data[tableOffset + 1] = palette[paletteOffset + 1];
+    data[tableOffset + 2] = palette[paletteOffset];
+  }
+  return riffChunk("strf", data);
+}
+
+function makeAvi(samples, metadata, palette, width, height, fps) {
+  const frameSize = samples[0]?.length ?? 0;
+  const frameChunks = samples.map((sample) => riffChunk("00db", sample));
+  const movi = riffList("movi", ...frameChunks);
+  const indexData = new Uint8Array(frameChunks.length * 16);
+  const indexView = new DataView(indexData.buffer);
+  let relativeOffset = 4;
+  frameChunks.forEach((chunk, index) => {
+    const offset = index * 16;
+    indexData.set(textEncoder.encode("00db"), offset);
+    indexView.setUint32(offset + 4, 0x10, true);
+    indexView.setUint32(offset + 8, relativeOffset, true);
+    indexView.setUint32(offset + 12, samples[index].length, true);
+    relativeOffset += chunk.length;
+  });
+  const dmlhData = new Uint8Array(248);
+  new DataView(dmlhData.buffer).setUint32(0, samples.length, true);
+  const streamHeader = makeAviStreamHeader(width, height, fps, samples.length, frameSize);
+  const streamFormat = makeAviBitmapInfo(width, height, frameSize, palette);
+  const strl = riffList("strl", streamHeader, streamFormat);
+  const hdrl = riffList("hdrl", makeAviHeader(width, height, fps, samples.length, frameSize), strl, riffList("odml", riffChunk("dmlh", dmlhData)));
+  const root = riffFile("AVI ", hdrl, movi, riffChunk("idx1", indexData), riffChunk("dqRC", metadata));
+  if (root.length > 0xffffffff) throw new Error("AVI 文件超过 4 GiB，当前浏览器封装器暂不支持。");
+  return root;
+}
+
 export async function encodeFileToApng(file, config, paletteOptions, onProgress = () => {}) {
   const capacity = calculateCapacity(config);
   const container = await createContainer(file, onProgress);
@@ -528,8 +649,32 @@ export async function encodeFileToMov(file, config, paletteOptions, onProgress =
   return { ...container, bytes, blob: new Blob([bytes], { type: "video/quicktime" }), frameCount, capacity, firstFrameIndices, palette, format: "mov" };
 }
 
+export async function encodeFileToAvi(file, config, paletteOptions, onProgress = () => {}) {
+  const capacity = calculateCapacity(config);
+  const container = await createContainer(file, onProgress);
+  const frameCount = Math.max(1, Math.ceil(container.bytes.length / capacity.payloadBytes));
+  if (frameCount > 10000) throw new Error("所需帧数超过 10,000，请提高分辨率、减小码元或选择更小的文件。");
+  const { palette, settings } = buildPalette(paletteOptions);
+  const metadata = makeEncodingMetadata(capacity, config, settings, "avi-pal8");
+  const samples = [];
+  let firstFrameIndices;
+  for (let index = 0; index < frameCount; index += 1) {
+    const start = index * capacity.payloadBytes;
+    const payload = container.bytes.subarray(start, Math.min(container.bytes.length, start + capacity.payloadBytes));
+    const indices = renderFrame(framePacket(payload, index, frameCount), capacity);
+    if (index === 0) firstFrameIndices = indices.slice();
+    samples.push(makeAviFrame(indices, capacity.resolution, capacity.resolution));
+    onProgress({ phase: "encode", progress: 0.1 + 0.86 * ((index + 1) / frameCount), message: `正在生成 AVI 调色板帧：${index + 1} / ${frameCount}` });
+    if (index % 2 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  const bytes = makeAvi(samples, metadata, palette, capacity.resolution, capacity.resolution, Number(config.fps));
+  onProgress({ phase: "done", progress: 1, message: "AVI 编码完成，8 位调色板无损视频已封装。" });
+  return { ...container, bytes, blob: new Blob([bytes], { type: "video/x-msvideo" }), frameCount, capacity, firstFrameIndices, palette, format: "avi" };
+}
+
 export function encodeFileToMedia(file, config, paletteOptions, format = "apng", onProgress = () => {}) {
   if (format === "mov") return encodeFileToMov(file, config, paletteOptions, onProgress);
+  if (format === "avi") return encodeFileToAvi(file, config, paletteOptions, onProgress);
   return encodeFileToApng(file, config, paletteOptions, onProgress);
 }
 
@@ -634,6 +779,83 @@ function extractMovSamples(bytes) {
     offset += size;
     return sample;
   });
+}
+
+function parseRiffChildren(bytes, start, end) {
+  const children = [];
+  let offset = start;
+  while (offset + 8 <= end) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset + offset, bytes.byteLength - offset);
+    const type = textDecoder.decode(bytes.subarray(offset, offset + 4));
+    const size = view.getUint32(4, true);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + size;
+    if (dataEnd > end || size < 0) throw new Error(`AVI 数据块 ${type} 不完整。`);
+    if (type === "LIST") {
+      if (size < 4) throw new Error("AVI LIST 数据块不完整。");
+      const listType = textDecoder.decode(bytes.subarray(dataStart, dataStart + 4));
+      children.push({ type, listType, offset, size, data: bytes.subarray(dataStart + 4, dataEnd), children: parseRiffChildren(bytes, dataStart + 4, dataEnd) });
+    } else {
+      children.push({ type, offset, size, data: bytes.subarray(dataStart, dataEnd) });
+    }
+    offset = dataEnd + (size & 1);
+  }
+  if (offset !== end) throw new Error("AVI 末尾存在无法解析的数据。");
+  return children;
+}
+
+function extractAviSamples(bytes) {
+  if (bytes.length < 12 || textDecoder.decode(bytes.subarray(0, 4)) !== "RIFF" || textDecoder.decode(bytes.subarray(8, 12)) !== "AVI ") throw new Error("不是受支持的 AVI 文件。");
+  const riffSize = new DataView(bytes.buffer, bytes.byteOffset + 4, 4).getUint32(0, true);
+  const end = Math.min(bytes.length, 8 + riffSize);
+  const children = parseRiffChildren(bytes, 12, end);
+  const metadataChunk = children.find((child) => child.type === "dqRC");
+  const movi = children.find((child) => child.type === "LIST" && child.listType === "movi");
+  if (!metadataChunk || !movi) throw new Error("AVI 缺少 6D-DQRCode 元数据或视频数据。");
+  let metadata;
+  try { metadata = JSON.parse(textDecoder.decode(metadataChunk.data)); } catch { throw new Error("AVI 编码参数元数据无法解析。"); }
+  const frames = movi.children.filter((child) => child.type === "00db" || child.type === "00dc").map((child) => child.data);
+  if (!frames.length || frames.length > 10000) throw new Error("AVI 帧数无效或超过 10,000 帧限制。");
+  return { frames, metadata };
+}
+
+function decodeAviFrame(frame, metadata) {
+  const width = Number(metadata.resolution);
+  const height = width;
+  if (metadata.mediaFormat === "avi-pal8") {
+    const rowStride = (width + 3) & ~3;
+    if (frame.length !== rowStride * height) throw new Error("AVI 调色板帧长度与编码参数不匹配。");
+    const indices = new Uint8Array(width * height);
+    for (let storedY = 0; storedY < height; storedY += 1) {
+      const targetY = height - 1 - storedY;
+      const sourceRow = storedY * rowStride;
+      const targetRow = targetY * width;
+      indices.set(frame.subarray(sourceRow, sourceRow + width), targetRow);
+    }
+    if (indices.some((index) => index >= 132)) throw new Error("AVI 调色板帧包含协议范围外的索引；文件可能被转码。");
+    return indices;
+  }
+  const rowStride = (width * 3 + 3) & ~3;
+  if (frame.length !== rowStride * height) throw new Error("AVI RGB 帧长度与编码参数不匹配。");
+  const { palette } = buildPalette(metadata.palette || {});
+  const paletteMap = new Map();
+  for (let index = 0; index < 132; index += 1) {
+    const offset = index * 3;
+    paletteMap.set((palette[offset] << 16) | (palette[offset + 1] << 8) | palette[offset + 2], index);
+  }
+  const indices = new Uint8Array(width * height);
+  for (let storedY = 0; storedY < height; storedY += 1) {
+    const targetY = height - 1 - storedY;
+    const row = storedY * rowStride;
+    for (let x = 0; x < width; x += 1) {
+      const source = row + x * 3;
+      const key = (frame[source + 2] << 16) | (frame[source + 1] << 8) | frame[source];
+      const index = paletteMap.get(key);
+      if (index === undefined) throw new Error("AVI RGB 帧包含不在协议调色板内的颜色；文件可能被转码。");
+      indices[targetY * width + x] = index;
+    }
+  }
+  return indices;
 }
 
 export function decodeFrame(indices, config) {
@@ -743,11 +965,33 @@ export async function decodeMov(input, onProgress = () => {}) {
   return { ...result, frameCount: samples.length, metadata, mediaFormat: "mov" };
 }
 
+export async function decodeAvi(input, onProgress = () => {}) {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  const { frames, metadata } = extractAviSamples(bytes);
+  const supportedFormat = metadata.mediaFormat === "avi-pal8" || metadata.mediaFormat === "avi-rgb24";
+  if (metadata.signature !== "6D-DQRCODE" || metadata.version !== FORMAT_VERSION || !supportedFormat) throw new Error("不是本站生成的 AVI 无损视频。");
+  const packets = new Array(frames.length);
+  for (let index = 0; index < frames.length; index += 1) {
+    const indices = decodeAviFrame(frames[index], metadata);
+    const frame = parseFramePacket(decodeFrame(indices, metadata));
+    if (frame.total !== frames.length || frame.index >= frames.length || packets[frame.index]) throw new Error("AVI 帧编号重复或与视频样本数不匹配。");
+    packets[frame.index] = frame.payload;
+    onProgress({ phase: "decode", progress: 0.05 + 0.82 * ((index + 1) / frames.length), message: `正在解析 AVI：${index + 1} / ${frames.length} 帧` });
+    if (index % 2 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  if (packets.some((packet) => !packet)) throw new Error("AVI 缺少部分数据帧。");
+  onProgress({ phase: "verify", progress: 0.9, message: "正在解压并核对 SHA-256…" });
+  const result = await parseContainer(concatBytes(packets));
+  onProgress({ phase: "done", progress: 1, message: "AVI 解码成功，原始文件完整性校验通过。" });
+  return { ...result, frameCount: frames.length, metadata, mediaFormat: "avi" };
+}
+
 export function decodeMedia(input, onProgress = () => {}) {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   if (bytes.length >= 8 && bytesEqual(bytes.subarray(0, 8), PNG_SIGNATURE)) return decodeApng(bytes, onProgress);
   if (bytes.length >= 12 && textDecoder.decode(bytes.subarray(4, 8)) === "ftyp") return decodeMov(bytes, onProgress);
-  throw new Error("请选择本站生成的 APNG 或 MOV 文件。");
+  if (bytes.length >= 12 && textDecoder.decode(bytes.subarray(0, 4)) === "RIFF" && textDecoder.decode(bytes.subarray(8, 12)) === "AVI ") return decodeAvi(bytes, onProgress);
+  throw new Error("请选择本站生成的 APNG、MOV 或 AVI 文件。");
 }
 
 export function paletteToRgba(palette, indices) {

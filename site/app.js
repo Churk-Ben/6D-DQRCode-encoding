@@ -52,7 +52,7 @@ function updateControls() {
   setOutput("#resolution-value", `${value.resolution} × ${value.resolution}`);
   setOutput("#cell-size-value", `${value.cellSize} px`);
   setOutput("#fps-value", `${value.fps} fps`);
-  const formatLabel = elements.outputFormat.value === "mov" ? "MOV" : "APNG";
+  const formatLabel = formatName(elements.outputFormat.value);
   setOutput("#format-value", formatLabel);
   elements.encodeButton.querySelector("span").textContent = `生成无损 ${formatLabel}`;
   setOutput("#hue-value", `${elements.hue.value}°`);
@@ -71,6 +71,10 @@ function updateControls() {
     $("#metric-frames").textContent = "—";
   }
   drawPalette();
+}
+
+function formatName(format) {
+  return format === "mov" ? "MOV" : format === "avi" ? "AVI" : "APNG";
 }
 
 function drawPalette() {
@@ -156,7 +160,7 @@ elements.encodeButton.addEventListener("click", async () => {
   elements.encodeResult.hidden = true;
   try {
     const format = elements.outputFormat.value;
-    const formatLabel = format === "mov" ? "MOV" : "APNG";
+    const formatLabel = formatName(format);
     const result = await encodeFileToMedia(sourceFile, config(), paletteConfig(), format, (update) => updateProgress("encode", update));
     if (encodeUrl) URL.revokeObjectURL(encodeUrl);
     encodeUrl = URL.createObjectURL(result.blob);
@@ -194,7 +198,9 @@ elements.decodeButton.addEventListener("click", async () => {
   finally { elements.decodeButton.disabled = false; }
 });
 
-for (const element of [elements.resolution, elements.cellSize, elements.fps, elements.outputFormat, elements.hue, elements.saturation, elements.lightness, elements.contrast]) element.addEventListener("input", updateControls);
+for (const element of [elements.resolution, elements.cellSize, elements.fps, elements.hue, elements.saturation, elements.lightness, elements.contrast]) element.addEventListener("input", updateControls);
+elements.outputFormat.addEventListener("input", updateControls);
+elements.outputFormat.addEventListener("change", updateControls);
 $("#palette-reset").addEventListener("click", () => {
   elements.hue.value = 198;
   elements.saturation.value = 82;

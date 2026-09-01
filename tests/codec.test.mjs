@@ -5,9 +5,11 @@ import {
   calculateCapacity,
   createContainerFromBytes,
   decodeApng,
+  decodeAvi,
   decodeMov,
   decodeFrame,
   encodeFileToApng,
+  encodeFileToAvi,
   encodeFileToMov,
   parseContainer,
   renderFrame,
@@ -86,6 +88,29 @@ test("PNG 无损视频轨道可封装为 MOV 并还原", async () => {
   assert.equal(new TextDecoder().decode(encoded.bytes.subarray(8, 12)), "qt  ");
   assert.ok(encoded.frameCount > 1);
   const decoded = await decodeMov(encoded.bytes);
+  assert.equal(decoded.name, fileLike.name);
+  assert.equal(decoded.frameCount, encoded.frameCount);
+  assert.deepEqual(decoded.bytes, source);
+});
+
+test("8 位调色板 AVI 可直接封装并无损还原", async () => {
+  const source = new Uint8Array(5000);
+  let state = 0x13a7c9e1;
+  for (let index = 0; index < source.length; index += 1) {
+    state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+    source[index] = state >>> 24;
+  }
+  const fileLike = {
+    name: "windows-playback.bin",
+    type: "application/octet-stream",
+    lastModified: 135792468,
+    arrayBuffer: async () => source.buffer.slice(0),
+  };
+  const encoded = await encodeFileToAvi(fileLike, { resolution: 128, cellSize: 4, fps: 30 }, buildPalette().settings);
+  assert.equal(new TextDecoder().decode(encoded.bytes.subarray(0, 4)), "RIFF");
+  assert.equal(new TextDecoder().decode(encoded.bytes.subarray(8, 12)), "AVI ");
+  assert.ok(encoded.bytes.length < encoded.frameCount * 128 * 128 * 2, "AVI 应接近每像素 1 字节，而不是 RGB24 的 3 字节");
+  const decoded = await decodeAvi(encoded.bytes);
   assert.equal(decoded.name, fileLike.name);
   assert.equal(decoded.frameCount, encoded.frameCount);
   assert.deepEqual(decoded.bytes, source);
