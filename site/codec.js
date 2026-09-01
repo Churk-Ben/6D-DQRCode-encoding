@@ -106,6 +106,77 @@ export function buildPalette(options = {}) {
   return { palette, settings };
 }
 
+export function buildWebmLumaMap(palette) {
+  if (!(palette instanceof Uint8Array) || palette.length < 132 * 3) throw new Error("WebM 调色板数据不完整。");
+  const ranked = Array.from({ length: 132 }, (_, index) => index);
+  ranked.sort((left, right) => {
+    const leftOffset = left * 3;
+    const rightOffset = right * 3;
+    const leftLuma = palette[leftOffset] * 0.2126 + palette[leftOffset + 1] * 0.7152 + palette[leftOffset + 2] * 0.0722;
+    const rightLuma = palette[rightOffset] * 0.2126 + palette[rightOffset + 1] * 0.7152 + palette[rightOffset + 2] * 0.0722;
+    return leftLuma - rightLuma || left - right;
+  });
+  const lumaMap = new Uint8Array(132);
+  ranked.forEach((paletteIndex, rank) => { lumaMap[paletteIndex] = 32 + Math.round(rank * 191 / 131); });
+  return lumaMap;
+}
+
+export function indicesToWebmYuv420(indices, palette, width, height, lumaMap = buildWebmLumaMap(palette)) {
+  if (width % 2 || height % 2) throw new Error("VP9 Profile 0 要求偶数分辨率。");
+  if (indices.length !== width * height) throw new Error("WebM 帧尺寸与索引数据不匹配。");
+  const ySize = width * height;
+  const chromaWidth = width / 2;
+  const output = new Uint8Array(ySize + ySize / 2);
+  for (let index = 0; index < indices.length; index += 1) {
+    const paletteIndex = indices[index];
+    if (paletteIndex >= 132) throw new Error("WebM 帧包含协议范围外的调色板索引。");
+    output[index] = lumaMap[paletteIndex];
+  }
+  const uOffset = ySize;
+  const vOffset = ySize + ySize / 4;
+  for (let y = 0; y < height; y += 2) {
+    for (let x = 0; x < width; x += 2) {
+      let red = 0;
+      let green = 0;
+      let blue = 0;
+      for (let dy = 0; dy < 2; dy += 1) {
+        for (let dx = 0; dx < 2; dx += 1) {
+          const paletteOffset = indices[(y + dy) * width + x + dx] * 3;
+          red += palette[paletteOffset];
+          green += palette[paletteOffset + 1];
+          blue += palette[paletteOffset + 2];
+        }
+      }
+      red /= 4;
+      green /= 4;
+      blue /= 4;
+      const chromaIndex = (y / 2) * chromaWidth + x / 2;
+      output[uOffset + chromaIndex] = Math.max(16, Math.min(240, Math.round(-0.148 * red - 0.291 * green + 0.439 * blue + 128)));
+      output[vOffset + chromaIndex] = Math.max(16, Math.min(240, Math.round(0.439 * red - 0.368 * green - 0.071 * blue + 128)));
+    }
+  }
+  return output;
+}
+
+export function webmYuv420ToIndices(frame, width, height, lumaMap) {
+  const ySize = width * height;
+  if (frame.length < ySize || !Array.isArray(lumaMap) && !(lumaMap instanceof Uint8Array) || lumaMap.length !== 132) throw new Error("WebM 亮度映射或帧数据不完整。");
+  const inverse = new Int16Array(256);
+  inverse.fill(-1);
+  for (let index = 0; index < lumaMap.length; index += 1) {
+    const value = Number(lumaMap[index]);
+    if (!Number.isInteger(value) || value < 0 || value > 255 || inverse[value] !== -1) throw new Error("WebM 亮度映射无效或存在重复值。");
+    inverse[value] = index;
+  }
+  const indices = new Uint8Array(ySize);
+  for (let index = 0; index < ySize; index += 1) {
+    const paletteIndex = inverse[frame[index]];
+    if (paletteIndex < 0) throw new Error("WebM 亮度平面包含协议映射外的值；视频可能被有损转码。");
+    indices[index] = paletteIndex;
+  }
+  return indices;
+}
+
 function markerAt(cellX, cellY, grid) {
   const anchors = [[0, 0], [grid - 7, 0], [0, grid - 7]];
   for (let marker = 0; marker < anchors.length; marker += 1) {
@@ -490,16 +561,42 @@ function riffFile(type, ...children) {
   return output;
 }
 
-function makeAviFrame(indices, width, height) {
-  const rowStride = (width + 3) & ~3;
-  const output = new Uint8Array(rowStride * height);
+function makeAviRle8Frame(indices, width, height) {
+  const output = [];
   for (let outputY = 0; outputY < height; outputY += 1) {
     const sourceY = height - 1 - outputY;
     const sourceRow = sourceY * width;
-    const targetRow = outputY * rowStride;
-    output.set(indices.subarray(sourceRow, sourceRow + width), targetRow);
+    let x = 0;
+    while (x < width) {
+      let runLength = 1;
+      while (runLength < 255 && x + runLength < width && indices[sourceRow + x + runLength] === indices[sourceRow + x]) runLength += 1;
+      if (runLength >= 3) {
+        output.push(runLength, indices[sourceRow + x]);
+        x += runLength;
+        continue;
+      }
+
+      const literalStart = x;
+      x += runLength;
+      while (x < width) {
+        let nextRunLength = 1;
+        while (nextRunLength < 255 && x + nextRunLength < width && indices[sourceRow + x + nextRunLength] === indices[sourceRow + x]) nextRunLength += 1;
+        if (nextRunLength >= 3 || x - literalStart + nextRunLength > 254) break;
+        x += nextRunLength;
+      }
+      const literalLength = x - literalStart;
+      if (literalLength < 3) {
+        for (let index = 0; index < literalLength; index += 1) output.push(1, indices[sourceRow + literalStart + index]);
+      } else {
+        output.push(0, literalLength);
+        for (let index = 0; index < literalLength; index += 1) output.push(indices[sourceRow + literalStart + index]);
+        if (literalLength & 1) output.push(0);
+      }
+    }
+    output.push(0, 0); // end of line
   }
-  return output;
+  output.push(0, 1); // end of bitmap
+  return Uint8Array.from(output);
 }
 
 function makeAviHeader(width, height, fps, frameCount, frameSize) {
@@ -521,7 +618,7 @@ function makeAviStreamHeader(width, height, fps, frameCount, frameSize) {
   const data = new Uint8Array(56);
   const view = new DataView(data.buffer);
   data.set(textEncoder.encode("vids"), 0);
-  data.set(textEncoder.encode("DIB "), 4); // BI_RGB / uncompressed DIB
+  data.set(textEncoder.encode("MRLE"), 4); // Microsoft RLE8
   view.setUint32(20, 1, true);
   view.setUint32(24, Math.max(1, Math.round(fps)), true);
   view.setUint32(32, frameCount, true);
@@ -544,7 +641,7 @@ function makeAviBitmapInfo(width, height, frameSize, palette) {
   view.setInt32(8, height, true); // bottom-up 8-bit indexed DIB
   view.setUint16(12, 1, true);
   view.setUint16(14, 8, true);
-  view.setUint32(16, 0, true); // BI_RGB
+  view.setUint32(16, 1, true); // BI_RLE8
   view.setUint32(20, frameSize, true);
   view.setInt32(24, 2835, true);
   view.setInt32(28, 2835, true);
@@ -561,15 +658,15 @@ function makeAviBitmapInfo(width, height, frameSize, palette) {
 }
 
 function makeAvi(samples, metadata, palette, width, height, fps) {
-  const frameSize = samples[0]?.length ?? 0;
-  const frameChunks = samples.map((sample) => riffChunk("00db", sample));
+  const frameSize = samples.reduce((largest, sample) => Math.max(largest, sample.length), 0);
+  const frameChunks = samples.map((sample) => riffChunk("00dc", sample));
   const movi = riffList("movi", ...frameChunks);
   const indexData = new Uint8Array(frameChunks.length * 16);
   const indexView = new DataView(indexData.buffer);
   let relativeOffset = 4;
   frameChunks.forEach((chunk, index) => {
     const offset = index * 16;
-    indexData.set(textEncoder.encode("00db"), offset);
+    indexData.set(textEncoder.encode("00dc"), offset);
     indexView.setUint32(offset + 4, 0x10, true);
     indexView.setUint32(offset + 8, relativeOffset, true);
     indexView.setUint32(offset + 12, samples[index].length, true);
@@ -584,6 +681,153 @@ function makeAvi(samples, metadata, palette, width, height, fps) {
   const root = riffFile("AVI ", hdrl, movi, riffChunk("idx1", indexData), riffChunk("dqRC", metadata));
   if (root.length > 0xffffffff) throw new Error("AVI 文件超过 4 GiB，当前浏览器封装器暂不支持。");
   return root;
+}
+
+let ffmpegInstance;
+let ffmpegLoadPromise;
+let ffmpegQueue = Promise.resolve();
+let ffmpegJobCounter = 0;
+let activeFfmpegProgress;
+
+function encodeBase64(value) {
+  const bytes = textEncoder.encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function decodeBase64(value) {
+  const binary = atob(value.trim());
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return textDecoder.decode(bytes);
+}
+
+function readEbmlId(bytes, offset) {
+  if (offset >= bytes.length) return null;
+  const first = bytes[offset];
+  let length = 1;
+  let marker = 0x80;
+  while (length <= 4 && !(first & marker)) {
+    marker >>= 1;
+    length += 1;
+  }
+  if (length > 4 || offset + length > bytes.length) throw new Error("WebM EBML 元素编号无效。");
+  let value = 0;
+  for (let index = 0; index < length; index += 1) value = value * 256 + bytes[offset + index];
+  return { value, length };
+}
+
+function readEbmlSize(bytes, offset) {
+  if (offset >= bytes.length) return null;
+  const first = bytes[offset];
+  let length = 1;
+  let marker = 0x80;
+  while (length <= 8 && !(first & marker)) {
+    marker >>= 1;
+    length += 1;
+  }
+  if (length > 8 || offset + length > bytes.length) throw new Error("WebM EBML 元素尺寸无效。");
+  let value = BigInt(first & (marker - 1));
+  let unknown = (first & (marker - 1)) === marker - 1;
+  for (let index = 1; index < length; index += 1) {
+    value = value * 256n + BigInt(bytes[offset + index]);
+    unknown = unknown && bytes[offset + index] === 0xff;
+  }
+  if (unknown) return { value: null, length };
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("WebM EBML 元素过大。");
+  return { value: Number(value), length };
+}
+
+export function extractWebmTag(bytes, wantedName) {
+  const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const MASTER_IDS = new Set([0x18538067, 0x1254c367, 0x7373]); // Segment, Tags, Tag
+  const TAG_NAME = 0x45a3;
+  const TAG_STRING = 0x4487;
+  const SIMPLE_TAG = 0x67c8;
+
+  function readSimpleTag(start, end) {
+    let offset = start;
+    let name;
+    let value;
+    while (offset < end) {
+      const id = readEbmlId(input, offset);
+      if (!id) break;
+      offset += id.length;
+      const size = readEbmlSize(input, offset);
+      if (!size) break;
+      offset += size.length;
+      const dataEnd = size.value === null ? end : offset + size.value;
+      if (dataEnd > end) throw new Error("WebM 标签数据不完整。");
+      if (id.value === TAG_NAME) name = textDecoder.decode(input.subarray(offset, dataEnd));
+      else if (id.value === TAG_STRING) value = textDecoder.decode(input.subarray(offset, dataEnd));
+      else if (id.value === SIMPLE_TAG) {
+        const nested = readSimpleTag(offset, dataEnd);
+        if (nested !== undefined) return nested;
+      }
+      offset = dataEnd;
+    }
+    return name === wantedName ? value : undefined;
+  }
+
+  function walk(start, end) {
+    let offset = start;
+    while (offset < end) {
+      const id = readEbmlId(input, offset);
+      if (!id) break;
+      offset += id.length;
+      const size = readEbmlSize(input, offset);
+      if (!size) break;
+      offset += size.length;
+      const dataEnd = size.value === null ? end : offset + size.value;
+      if (dataEnd > end) throw new Error("WebM EBML 数据不完整。");
+      if (id.value === SIMPLE_TAG) {
+        const value = readSimpleTag(offset, dataEnd);
+        if (value !== undefined) return value;
+      } else if (MASTER_IDS.has(id.value)) {
+        const value = walk(offset, dataEnd);
+        if (value !== undefined) return value;
+      }
+      offset = dataEnd;
+    }
+    return undefined;
+  }
+
+  return walk(0, input.length);
+}
+
+async function getFfmpeg(onProgress, loadProgress = 0.05) {
+  if (!globalThis.FFmpegWASM?.FFmpeg) throw new Error("FFmpeg WebAssembly 运行时未加载，请刷新页面后重试。");
+  if (!ffmpegInstance) {
+    ffmpegInstance = new globalThis.FFmpegWASM.FFmpeg();
+    ffmpegInstance.on("progress", ({ progress }) => activeFfmpegProgress?.(Math.max(0, Math.min(1, progress))));
+  }
+  if (!ffmpegInstance.loaded) {
+    onProgress({ phase: "ffmpeg", progress: loadProgress, message: "正在载入本地 FFmpeg 无损视频引擎（约 32 MB）…" });
+    if (!ffmpegLoadPromise) {
+      const coreURL = new URL("./vendor/ffmpeg/ffmpeg-core.js", import.meta.url).href;
+      const wasmURL = new URL("./vendor/ffmpeg/ffmpeg-core.wasm", import.meta.url).href;
+      ffmpegLoadPromise = ffmpegInstance.load({ coreURL, wasmURL }).catch((error) => {
+        ffmpegLoadPromise = undefined;
+        throw error;
+      });
+    }
+    await ffmpegLoadPromise;
+  }
+  return ffmpegInstance;
+}
+
+function queueFfmpeg(task) {
+  const next = ffmpegQueue.then(task, task);
+  ffmpegQueue = next.catch(() => {});
+  return next;
+}
+
+async function cleanupFfmpegFiles(ffmpeg, paths) {
+  activeFfmpegProgress = undefined;
+  for (const path of paths) {
+    try { await ffmpeg.deleteFile(path); } catch { /* file may not have been created */ }
+  }
 }
 
 export async function encodeFileToApng(file, config, paletteOptions, onProgress = () => {}) {
@@ -655,7 +899,7 @@ export async function encodeFileToAvi(file, config, paletteOptions, onProgress =
   const frameCount = Math.max(1, Math.ceil(container.bytes.length / capacity.payloadBytes));
   if (frameCount > 10000) throw new Error("所需帧数超过 10,000，请提高分辨率、减小码元或选择更小的文件。");
   const { palette, settings } = buildPalette(paletteOptions);
-  const metadata = makeEncodingMetadata(capacity, config, settings, "avi-pal8");
+  const metadata = makeEncodingMetadata(capacity, config, settings, "avi-rle8");
   const samples = [];
   let firstFrameIndices;
   for (let index = 0; index < frameCount; index += 1) {
@@ -663,18 +907,73 @@ export async function encodeFileToAvi(file, config, paletteOptions, onProgress =
     const payload = container.bytes.subarray(start, Math.min(container.bytes.length, start + capacity.payloadBytes));
     const indices = renderFrame(framePacket(payload, index, frameCount), capacity);
     if (index === 0) firstFrameIndices = indices.slice();
-    samples.push(makeAviFrame(indices, capacity.resolution, capacity.resolution));
-    onProgress({ phase: "encode", progress: 0.1 + 0.86 * ((index + 1) / frameCount), message: `正在生成 AVI 调色板帧：${index + 1} / ${frameCount}` });
+    samples.push(makeAviRle8Frame(indices, capacity.resolution, capacity.resolution));
+    onProgress({ phase: "encode", progress: 0.1 + 0.86 * ((index + 1) / frameCount), message: `正在生成 AVI RLE8 调色板帧：${index + 1} / ${frameCount}` });
     if (index % 2 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
   }
   const bytes = makeAvi(samples, metadata, palette, capacity.resolution, capacity.resolution, Number(config.fps));
-  onProgress({ phase: "done", progress: 1, message: "AVI 编码完成，8 位调色板无损视频已封装。" });
+  onProgress({ phase: "done", progress: 1, message: "AVI 编码完成，Windows RLE8 调色板无损视频已封装。" });
   return { ...container, bytes, blob: new Blob([bytes], { type: "video/x-msvideo" }), frameCount, capacity, firstFrameIndices, palette, format: "avi" };
+}
+
+export async function encodeFileToWebm(file, config, paletteOptions, onProgress = () => {}) {
+  const capacity = calculateCapacity(config);
+  if (capacity.resolution % 2) throw new Error("WebM VP9 要求偶数分辨率。");
+  const container = await createContainer(file, onProgress);
+  const frameCount = Math.max(1, Math.ceil(container.bytes.length / capacity.payloadBytes));
+  if (frameCount > 10000) throw new Error("所需帧数超过 10,000，请提高分辨率、减小码元或选择更小的文件。");
+  const { palette, settings } = buildPalette(paletteOptions);
+  const lumaMap = buildWebmLumaMap(palette);
+  const frameSize = capacity.resolution * capacity.resolution * 3 / 2;
+  const rawLength = frameSize * frameCount;
+  if (!Number.isSafeInteger(rawLength) || rawLength > 1_500_000_000) throw new Error("WebM 原始帧缓存将超过 1.5 GB，请提高码元边长或降低分辨率。");
+  const rawVideo = new Uint8Array(rawLength);
+  let firstFrameIndices;
+  for (let index = 0; index < frameCount; index += 1) {
+    const start = index * capacity.payloadBytes;
+    const payload = container.bytes.subarray(start, Math.min(container.bytes.length, start + capacity.payloadBytes));
+    const indices = renderFrame(framePacket(payload, index, frameCount), capacity);
+    if (index === 0) firstFrameIndices = indices.slice();
+    rawVideo.set(indicesToWebmYuv420(indices, palette, capacity.resolution, capacity.resolution, lumaMap), index * frameSize);
+    onProgress({ phase: "encode", progress: 0.1 + 0.38 * ((index + 1) / frameCount), message: `正在生成 VP9 数据帧：${index + 1} / ${frameCount}` });
+    if (index % 2 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  const metadata = JSON.parse(textDecoder.decode(makeEncodingMetadata(capacity, config, settings, "webm-vp9-lossless")));
+  metadata.frameCount = frameCount;
+  metadata.pixelFormat = "yuv420p";
+  metadata.lumaMap = Array.from(lumaMap);
+  const metadataTag = encodeBase64(JSON.stringify(metadata));
+
+  const bytes = await queueFfmpeg(async () => {
+    const ffmpeg = await getFfmpeg(onProgress, 0.5);
+    const job = ++ffmpegJobCounter;
+    const inputPath = `dqrc-${job}.yuv`;
+    const outputPath = `dqrc-${job}.webm`;
+    try {
+      activeFfmpegProgress = (progress) => onProgress({ phase: "ffmpeg", progress: 0.52 + progress * 0.45, message: `FFmpeg 正在编码 VP9 无损视频：${Math.round(progress * 100)}%` });
+      await ffmpeg.writeFile(inputPath, rawVideo);
+      const status = await ffmpeg.exec([
+        "-f", "rawvideo", "-pixel_format", "yuv420p", "-video_size", `${capacity.resolution}x${capacity.resolution}`,
+        "-framerate", String(Math.max(1, Number(config.fps))), "-i", inputPath, "-frames:v", String(frameCount),
+        "-an", "-c:v", "libvpx-vp9", "-lossless", "1", "-pix_fmt", "yuv420p", "-deadline", "good",
+        "-cpu-used", "5", "-lag-in-frames", "0", "-auto-alt-ref", "0", "-row-mt", "1",
+        "-color_range", "tv", "-colorspace", "bt470bg", "-color_primaries", "bt709", "-color_trc", "iec61966-2-1",
+        "-metadata", `DQRCODE=${metadataTag}`, outputPath,
+      ]);
+      if (status !== 0) throw new Error(`FFmpeg VP9 编码失败（状态 ${status}）。`);
+      return (await ffmpeg.readFile(outputPath)).slice();
+    } finally {
+      await cleanupFfmpegFiles(ffmpeg, [inputPath, outputPath]);
+    }
+  });
+  onProgress({ phase: "done", progress: 1, message: "WebM 编码完成，VP9 Profile 0 无损视频已封装。" });
+  return { ...container, bytes, blob: new Blob([bytes], { type: "video/webm" }), frameCount, capacity, firstFrameIndices, palette, format: "webm" };
 }
 
 export function encodeFileToMedia(file, config, paletteOptions, format = "apng", onProgress = () => {}) {
   if (format === "mov") return encodeFileToMov(file, config, paletteOptions, onProgress);
   if (format === "avi") return encodeFileToAvi(file, config, paletteOptions, onProgress);
+  if (format === "webm") return encodeFileToWebm(file, config, paletteOptions, onProgress);
   return encodeFileToApng(file, config, paletteOptions, onProgress);
 }
 
@@ -822,6 +1121,46 @@ function extractAviSamples(bytes) {
 function decodeAviFrame(frame, metadata) {
   const width = Number(metadata.resolution);
   const height = width;
+  if (metadata.mediaFormat === "avi-rle8") {
+    const indices = new Uint8Array(width * height);
+    let offset = 0;
+    let x = 0;
+    let storedY = 0;
+    let ended = false;
+    while (offset + 1 < frame.length) {
+      const count = frame[offset++];
+      const value = frame[offset++];
+      if (count) {
+        if (storedY >= height || x + count > width || value >= 132) throw new Error("AVI RLE8 编码游程超出帧边界或调色板范围。");
+        const targetRow = (height - 1 - storedY) * width;
+        indices.fill(value, targetRow + x, targetRow + x + count);
+        x += count;
+        continue;
+      }
+      if (value === 0) {
+        if (x !== width || storedY >= height) throw new Error("AVI RLE8 行长度与编码参数不匹配。");
+        storedY += 1;
+        x = 0;
+        continue;
+      }
+      if (value === 1) {
+        ended = true;
+        break;
+      }
+      if (value === 2) throw new Error("AVI RLE8 包含本站编码器未使用的位移指令。");
+      if (storedY >= height || x + value > width || offset + value > frame.length) throw new Error("AVI RLE8 绝对数据超出帧边界。");
+      const targetRow = (height - 1 - storedY) * width;
+      for (let index = 0; index < value; index += 1) {
+        const paletteIndex = frame[offset + index];
+        if (paletteIndex >= 132) throw new Error("AVI RLE8 帧包含协议范围外的调色板索引。");
+        indices[targetRow + x + index] = paletteIndex;
+      }
+      offset += value + (value & 1);
+      x += value;
+    }
+    if (!ended || storedY !== height || x !== 0) throw new Error("AVI RLE8 帧未完整结束。");
+    return indices;
+  }
   if (metadata.mediaFormat === "avi-pal8") {
     const rowStride = (width + 3) & ~3;
     if (frame.length !== rowStride * height) throw new Error("AVI 调色板帧长度与编码参数不匹配。");
@@ -968,7 +1307,7 @@ export async function decodeMov(input, onProgress = () => {}) {
 export async function decodeAvi(input, onProgress = () => {}) {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   const { frames, metadata } = extractAviSamples(bytes);
-  const supportedFormat = metadata.mediaFormat === "avi-pal8" || metadata.mediaFormat === "avi-rgb24";
+  const supportedFormat = metadata.mediaFormat === "avi-rle8" || metadata.mediaFormat === "avi-pal8" || metadata.mediaFormat === "avi-rgb24";
   if (metadata.signature !== "6D-DQRCODE" || metadata.version !== FORMAT_VERSION || !supportedFormat) throw new Error("不是本站生成的 AVI 无损视频。");
   const packets = new Array(frames.length);
   for (let index = 0; index < frames.length; index += 1) {
@@ -986,12 +1325,62 @@ export async function decodeAvi(input, onProgress = () => {}) {
   return { ...result, frameCount: frames.length, metadata, mediaFormat: "avi" };
 }
 
+export async function decodeWebm(input, onProgress = () => {}) {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  onProgress({ phase: "decode", progress: 0.03, message: "正在读取 WebM 协议元数据…" });
+  const encodedMetadata = extractWebmTag(bytes, "DQRCODE");
+  if (!encodedMetadata) throw new Error("WebM 中未找到 6D-DQRCode 协议元数据。");
+  let metadata;
+  try { metadata = JSON.parse(decodeBase64(encodedMetadata)); } catch { throw new Error("WebM 中的 6D-DQRCode 元数据无法解析。"); }
+  if (metadata.signature !== "6D-DQRCODE" || metadata.version !== FORMAT_VERSION || metadata.mediaFormat !== "webm-vp9-lossless") throw new Error("不是本站生成的 VP9 无损 WebM。");
+  const width = Number(metadata.resolution);
+  const height = width;
+  const frameCount = Number(metadata.frameCount);
+  if (!Number.isInteger(width) || width < 128 || width > 2048 || width % 2 || !Number.isInteger(frameCount) || frameCount < 1 || frameCount > 10000) throw new Error("WebM 编码参数无效。");
+
+  const decoded = await queueFfmpeg(async () => {
+    const ffmpeg = await getFfmpeg(onProgress, 0.04);
+    const job = ++ffmpegJobCounter;
+    const inputPath = `dqrc-${job}.webm`;
+    const outputPath = `dqrc-${job}.yuv`;
+    try {
+      await ffmpeg.writeFile(inputPath, bytes.slice());
+      activeFfmpegProgress = (progress) => onProgress({ phase: "ffmpeg", progress: 0.08 + progress * 0.55, message: `FFmpeg 正在无损解码 VP9：${Math.round(progress * 100)}%` });
+      const decodeStatus = await ffmpeg.exec(["-i", inputPath, "-map", "0:v:0", "-an", "-pix_fmt", "yuv420p", "-f", "rawvideo", outputPath]);
+      if (decodeStatus !== 0) throw new Error(`FFmpeg VP9 解码失败（状态 ${decodeStatus}）。`);
+      const rawVideo = await ffmpeg.readFile(outputPath);
+      const frameSize = width * height * 3 / 2;
+      if (rawVideo.length !== frameSize * frameCount) throw new Error("WebM 解码后的帧数或尺寸与协议元数据不匹配。");
+      return { rawVideo: rawVideo.slice(), metadata, width, height, frameCount, frameSize };
+    } finally {
+      await cleanupFfmpegFiles(ffmpeg, [inputPath, outputPath]);
+    }
+  });
+
+  const packets = new Array(decoded.frameCount);
+  for (let index = 0; index < decoded.frameCount; index += 1) {
+    const yuvFrame = decoded.rawVideo.subarray(index * decoded.frameSize, (index + 1) * decoded.frameSize);
+    const indices = webmYuv420ToIndices(yuvFrame, decoded.width, decoded.height, decoded.metadata.lumaMap);
+    const frame = parseFramePacket(decodeFrame(indices, decoded.metadata));
+    if (frame.total !== decoded.frameCount || frame.index >= decoded.frameCount || packets[frame.index]) throw new Error("WebM 帧编号重复或与视频样本数不匹配。");
+    packets[frame.index] = frame.payload;
+    onProgress({ phase: "decode", progress: 0.65 + 0.22 * ((index + 1) / decoded.frameCount), message: `正在解析 WebM：${index + 1} / ${decoded.frameCount} 帧` });
+    if (index % 2 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  if (packets.some((packet) => !packet)) throw new Error("WebM 缺少部分数据帧。");
+  onProgress({ phase: "verify", progress: 0.9, message: "正在解压并核对 SHA-256…" });
+  const result = await parseContainer(concatBytes(packets));
+  onProgress({ phase: "done", progress: 1, message: "WebM 解码成功，原始文件完整性校验通过。" });
+  return { ...result, frameCount: decoded.frameCount, metadata: decoded.metadata, mediaFormat: "webm" };
+}
+
 export function decodeMedia(input, onProgress = () => {}) {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   if (bytes.length >= 8 && bytesEqual(bytes.subarray(0, 8), PNG_SIGNATURE)) return decodeApng(bytes, onProgress);
+  if (bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return decodeWebm(bytes, onProgress);
   if (bytes.length >= 12 && textDecoder.decode(bytes.subarray(4, 8)) === "ftyp") return decodeMov(bytes, onProgress);
   if (bytes.length >= 12 && textDecoder.decode(bytes.subarray(0, 4)) === "RIFF" && textDecoder.decode(bytes.subarray(8, 12)) === "AVI ") return decodeAvi(bytes, onProgress);
-  throw new Error("请选择本站生成的 APNG、MOV 或 AVI 文件。");
+  throw new Error("请选择本站生成的 APNG、WebM、MOV 或 AVI 文件。");
 }
 
 export function paletteToRgba(palette, indices) {

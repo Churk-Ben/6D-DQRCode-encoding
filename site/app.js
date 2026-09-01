@@ -16,7 +16,7 @@ const elements = {
   palette: $("#palette"), encodeButton: $("#encode-button"), decodeButton: $("#decode-button"),
   encodeStatus: $("#encode-status"), encodeStatusText: $("#encode-status-text"), encodePercent: $("#encode-percent"), encodeProgress: $("#encode-progress"),
   decodeStatus: $("#decode-status"), decodeStatusText: $("#decode-status-text"), decodePercent: $("#decode-percent"), decodeProgress: $("#decode-progress"),
-  encodeResult: $("#encode-result"), decodeResult: $("#decode-result"), canvas: $("#frame-preview"),
+  encodeResult: $("#encode-result"), decodeResult: $("#decode-result"), canvas: $("#frame-preview"), video: $("#video-preview"),
   mediaDownload: $("#media-download"), fileDownload: $("#file-download"), toast: $("#toast"),
 };
 
@@ -74,7 +74,7 @@ function updateControls() {
 }
 
 function formatName(format) {
-  return format === "mov" ? "MOV" : format === "avi" ? "AVI" : "APNG";
+  return format === "webm" ? "WebM" : format === "mov" ? "MOV" : format === "avi" ? "AVI" : "APNG";
 }
 
 function drawPalette() {
@@ -158,6 +158,9 @@ elements.encodeButton.addEventListener("click", async () => {
   if (!sourceFile) return;
   elements.encodeButton.disabled = true;
   elements.encodeResult.hidden = true;
+  elements.video.pause();
+  elements.video.removeAttribute("src");
+  elements.video.load();
   try {
     const format = elements.outputFormat.value;
     const formatLabel = formatName(format);
@@ -169,6 +172,14 @@ elements.encodeButton.addEventListener("click", async () => {
     $("#media-download-label").textContent = `下载 ${formatLabel}`;
     $("#media-result-title").textContent = `${formatLabel} 已生成`;
     renderPreview(result.firstFrameIndices, result.palette, result.capacity.resolution);
+    const isWebm = format === "webm";
+    elements.canvas.hidden = isWebm;
+    elements.video.hidden = !isWebm;
+    $("#preview-label").textContent = isWebm ? "VP9 LOSSLESS" : "FRAME 0001";
+    if (isWebm) {
+      elements.video.src = encodeUrl;
+      elements.video.play().catch(() => {});
+    }
     const summary = $("#encode-summary");
     summary.replaceChildren();
     addSummaryItem(summary, "原始 / 压缩", `${formatBytes(result.originalSize)} / ${formatBytes(result.compressedSize)}`);

@@ -169,14 +169,15 @@ _本报告完全基于对话历史中用户定义的编码模型撰写，所有�
 
 仓库的 [`site/`](./site/) 是一个不依赖后端和构建工具的静态网页，实现了：
 
-- 任意类型文件 → 浏览器原生 GZIP 压缩 → 6D 码元映射 → 无损索引色 APNG、MOV 或 AVI；
+- 任意类型文件 → 浏览器原生 GZIP 压缩 → 6D 码元映射 → 无损 APNG、VP9 WebM、MOV 或 AVI；
+- WebM 通过随站点部署的 FFmpeg WebAssembly 编码为 VP9 Profile 0；亮度平面保存可逆码元索引，色度平面保留可视颜色；
 - MOV 使用 QuickTime 容器中的逐帧 PNG 无损视频轨道，可由 QuickTime、VLC、FFmpeg 等兼容工具读取；
-- AVI 使用 8-bit 索引色 DIB 帧并内嵌调色板，优先兼容 Windows 自带播放器；
-- APNG / MOV / AVI → 逐帧 CRC32 校验 → GZIP 解压 → SHA-256 校验 → 原文件；
+- AVI 使用 Windows BI_RLE8 / MRLE 索引色帧并内嵌调色板，由系统解码器无损展开后播放；
+- APNG / WebM / MOV / AVI → 逐帧 CRC32 校验 → GZIP 解压 → SHA-256 校验 → 原文件；
 - 分辨率、码元边长、帧率以及 8×8 颜色/亮度调色板的可视化调节；
 - 左上、右上、左下三个 7×7 定位点。定位结构已预留，但当前版本不支持摄像头或移动端动态扫码。
 
-所有文件数据均在浏览器本地处理，不会上传到服务器。推荐使用最新版 Chrome、Edge 或 Firefox。大文件会在浏览器内产生明显大于原文件的 APNG、MOV 或 AVI，这是像素载荷密度与无损图像/视频容器共同决定的正常开销。AVI 的索引色帧不做视频层压缩，但每像素仅需 1 字节，约为旧 RGB24 AVI 的三分之一，并优先保证 Windows 播放器兼容性；MOV 的浏览器内预览兼容性有限，但不影响下载、播放或由本站解码还原。
+所有文件数据均在浏览器本地处理，不会上传到服务器。推荐使用最新版 Chrome、Edge 或 Firefox。WebM 是推荐的视频格式：VP9 Profile 0 可由现代浏览器和 Windows 媒体栈解码，且解码后的亮度样本会由本站逐字节核验。首次编码或解码 WebM 时会从站点自身加载约 32 MB 的 FFmpeg WebAssembly 核心；它通常明显慢于桌面版 FFmpeg。AVI 与 MOV 保留用于兼容既有文件，但不同 Windows 播放器对 RLE8 和 PNG 视频轨道的支持并不一致。
 
 ### 本地预览
 
@@ -198,4 +199,4 @@ python -m http.server 8080 --directory site
 node --test tests/codec.test.mjs
 ```
 
-测试覆盖码元逐位往返、GZIP/SHA-256 容器校验、多帧 APNG、PNG-MOV 以及调色板 AVI 无损视频的完整往返。
+测试覆盖码元逐位往返、WebM YUV 数据平面、GZIP/SHA-256 容器校验、多帧 APNG、PNG-MOV 以及 RLE8 调色板 AVI 无损视频的完整往返。

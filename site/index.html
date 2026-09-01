@@ -41,7 +41,7 @@
           <h1 id="page-title">把任意文件，变成一段<br /><em>可逆的彩色光场。</em></h1>
         </div>
         <div class="intro-copy">
-          <p>原文件先经浏览器原生 GZIP 压缩，再映射到形状、颜色、亮度与时间维度，输出无损 APNG、MOV 或 AVI。所有数据只在当前设备内流动。</p>
+        <p>原文件先经浏览器原生 GZIP 压缩，再映射到形状、颜色、亮度与时间维度，输出无损 APNG、WebM、MOV 或 AVI。所有数据只在当前设备内流动。</p>
           <div class="formula"><span>单帧位数</span><strong>R² · (1 + 6 / a²)</strong></div>
         </div>
       </section>
@@ -51,7 +51,7 @@
         <div class="workspace-main">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">FILE → GZIP → APNG / MOV / AVI</p>
+              <p class="eyebrow">FILE → GZIP → APNG / WEBM / MOV / AVI</p>
               <h2 id="encode-heading">编码工作台</h2>
             </div>
             <p>推荐从 512 × 512、a = 8 开始。更小码元容量更高，更大码元轮廓更清晰。</p>
@@ -91,9 +91,10 @@
               <label class="field">
                 <span>导出格式 <output id="format-value">APNG</output></span>
                 <select id="output-format">
-                  <option value="apng" selected>APNG · 索引色无损动画</option>
+                  <option value="apng">APNG · 索引色无损动画</option>
+                  <option value="webm" selected>WebM · FFmpeg VP9 无损视频</option>
                   <option value="mov">MOV · PNG 无损视频轨道</option>
-                  <option value="avi">AVI · 8-bit 调色板无损播放</option>
+                  <option value="avi">AVI · Windows RLE8 无损播放</option>
                 </select>
               </label>
               <div class="metrics" aria-live="polite">
@@ -121,7 +122,7 @@
 
           <div class="action-row">
             <button class="primary-button" id="encode-button" type="button" disabled><span>生成无损 APNG</span><b aria-hidden="true">→</b></button>
-            <p>定位点已写入左上、右上、左下。AVI 使用 8-bit 索引色帧与内嵌调色板，保持 Windows 播放兼容的同时约为旧 RGB24 AVI 的三分之一。暂不启用移动端动态扫码。</p>
+            <p>推荐 WebM：FFmpeg 将码元索引写入 VP9 Profile 0 的无损亮度平面，浏览器与现代 Windows 可直接播放，本站可逐字节还原。首次使用会加载约 32 MB 本地引擎。</p>
           </div>
 
           <div class="job-status" id="encode-status" hidden>
@@ -130,7 +131,7 @@
           </div>
 
           <div class="result-panel" id="encode-result" hidden>
-            <div class="preview-frame"><canvas id="frame-preview" width="512" height="512"></canvas><span>FRAME 0001</span></div>
+            <div class="preview-frame"><canvas id="frame-preview" width="512" height="512"></canvas><video id="video-preview" controls loop muted playsinline hidden></video><span id="preview-label">FRAME 0001</span></div>
             <div class="result-copy">
               <p class="eyebrow">ENCODE VERIFIED</p>
               <h3 id="media-result-title">APNG 已生成</h3>
@@ -146,16 +147,16 @@
         <div class="workspace-main">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">APNG / MOV / AVI → VERIFY → FILE</p>
+              <p class="eyebrow">APNG / WEBM / MOV / AVI → VERIFY → FILE</p>
               <h2 id="decode-heading">还原原始文件</h2>
             </div>
-            <p>读取本站生成的 APNG、MOV 或 AVI，逐帧校验 CRC，解压后再比对 SHA-256；文件名、类型和修改时间一并恢复。</p>
+            <p>读取本站生成的 APNG、WebM、MOV 或 AVI，逐帧校验 CRC，解压后再比对 SHA-256；文件名、类型和修改时间一并恢复。</p>
           </div>
           <div class="decode-grid">
             <label class="dropzone decode-dropzone" id="decode-dropzone">
-              <input id="decode-file" type="file" accept=".png,.apng,.mov,.avi,image/png,image/apng,video/quicktime,video/x-msvideo" />
+              <input id="decode-file" type="file" accept=".png,.apng,.webm,.mov,.avi,image/png,image/apng,video/webm,video/quicktime,video/x-msvideo" />
               <span class="drop-icon" aria-hidden="true">↙</span>
-              <span class="drop-copy"><strong>选择 APNG、MOV 或 AVI</strong><small>支持拖放 · 仅解析本协议文件</small></span>
+              <span class="drop-copy"><strong>选择 APNG、WebM、MOV 或 AVI</strong><small>支持拖放 · 仅解析本协议文件</small></span>
               <span class="file-chip" id="decode-file-chip">尚未选择</span>
             </label>
             <div class="decode-action">
@@ -183,13 +184,14 @@
           <li><span>01</span><strong>压缩与封装</strong><p>GZIP 压缩后写入文件名、MIME、原尺寸与 SHA-256。</p></li>
           <li><span>02</span><strong>多维映射</strong><p>每个 a×a 码元保存 a² 个形状位和 6 个颜色亮度位。</p></li>
           <li><span>03</span><strong>逐帧保护</strong><p>每帧带序号、长度和 CRC32，可发现缺帧与像素损坏。</p></li>
-          <li><span>04</span><strong>无损还原</strong><p>APNG、MOV 的 PNG 视频帧或 AVI 的调色板帧均不经有损变换，最终以 SHA-256 验证原文。</p></li>
+          <li><span>04</span><strong>无损还原</strong><p>WebM 的 VP9 数据平面、APNG/MOV 的 PNG 帧及 AVI 的 RLE8 帧均可逆，最终以 SHA-256 验证原文。</p></li>
         </ol>
       </section>
     </main>
 
     <footer><span>6D DQRCODE / OPEN PROTOCOL EXPERIMENT</span><span>纯静态 · 零上传 · 浏览器内运行</span></footer>
     <div class="toast" id="toast" role="alert" hidden></div>
+    <script src="./vendor/ffmpeg/ffmpeg.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>
