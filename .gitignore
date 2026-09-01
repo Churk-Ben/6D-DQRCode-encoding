@@ -1,0 +1,68 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+eggs/
+.eggs/
+sdist/
+wheels/
+MANIFEST
+
+# Virtual environments & env files
+.env
+.env.*
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python version
+.python-version
+
+# Testing & coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+.pytest_cache/
+
+# OS
+.DS_store
+config.ini
+
+# Project data
+logs/
+data/
+temp/
+extensions/
+
+# IDE / Editor
+.vscode/
+.editor/
+.cursor/
+.idea/
+.trae/
+.reasonix/
+.codegraph/
+*.code-workspace
+.claude/
+.agents/
+CLAUDE.md
+graphify-out/
+
+# cache
+.npm-cache/
+
+# personal config copied from config.example
+config/

@@ -1,0 +1,18 @@
+[project]
+name = "6d-dqrcode-encoding"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [{ name = "Churk_Ben", email = "2779675416@qq.com" }]
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.5.2", "matplotlib>=3.9.0"]
+
+[project.scripts]
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = true
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
